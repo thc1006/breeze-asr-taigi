@@ -360,6 +360,50 @@ class TestDiarizationPipelineErrorMapping:
         with pytest.raises(ModelLoadError, match="License acceptance required"):
             d.load()
 
+    def test_run_builds_kwargs_and_handles_empty_itertracks(self) -> None:
+        """Cover the Python-testable parts of DiarizationPipeline.run() that
+        are NOT pyannote-GPU-bound: the kw-builder (passes through num/min/max
+        speakers), the ``self._pipeline is None`` guard, and the post-loop
+        sort + return on an empty diarization."""
+        from taigi_asr.diarize import DiarizationPipeline
+        from taigi_asr.errors import TranscriptionError
+
+        captured_kwargs: list[dict] = []
+
+        class _EmptyDiarization:
+            def itertracks(self, yield_label=True):
+                return iter([])
+
+        def _fake_pipeline_call(_wav_path, **kw):
+            captured_kwargs.append(kw)
+            return _EmptyDiarization()
+
+        d = DiarizationPipeline(hf_token="dummy")
+        # Bypass load() — directly install a callable as the underlying
+        # pipeline. This lets us hit run()'s pure-Python branches without
+        # spinning up pyannote.
+        d._pipeline = _fake_pipeline_call  # type: ignore[assignment]
+        d._loaded = True
+
+        # No kwargs — kw dict stays empty.
+        assert d.run("/tmp/fake.wav") == []
+        assert captured_kwargs[-1] == {}
+
+        # All three flags — each branch of the kw-builder.
+        d.run("/tmp/fake.wav", num_speakers=3, min_speakers=2, max_speakers=5)
+        assert captured_kwargs[-1] == {
+            "num_speakers": 3,
+            "min_speakers": 2,
+            "max_speakers": 5,
+        }
+
+        # Unloaded-during-run guard: simulate concurrent unload by setting
+        # ``_pipeline = None`` after the load() bypass. ``run()`` must raise
+        # TranscriptionError instead of crashing on ``None(...)`` call.
+        d._pipeline = None
+        with pytest.raises(TranscriptionError, match="pipeline unloaded"):
+            d.run("/tmp/fake.wav")
+
     def test_is_loaded_false_before_load(self) -> None:
         from taigi_asr.diarize import DiarizationPipeline
 
