@@ -297,7 +297,7 @@ pre-commit install
 如需開啟 `--diarize` 開發：
 
 ```bash
-pip install "pyannote.audio<4"      # v3 系列相容 torch 2.6 CUDA
+pip install -e ".[diarize]"          # pyannote.audio v3 系列（相容 torch 2.6 CUDA）
 export HF_TOKEN=hf_xxx               # 接受 license（見「講者分群」節）
 python -m taigi_asr.cli sample.m4a --diarize --format srt,txt,json
 ```

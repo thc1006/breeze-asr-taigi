@@ -59,6 +59,14 @@ hf = [
     "accelerate>=0.30",
     "bitsandbytes>=0.43; sys_platform == 'linux'",
 ]
+# Speaker diarization via pyannote/speaker-diarization-3.1.
+# Pinned <4 because 4.0 requires torch>=2.8 and the project targets the
+# CUDA 12.4 wheel of torch 2.6 for the RTX 3050 / 4 GB path.
+# Requires HF_TOKEN + license acceptance for both speaker-diarization-3.1
+# and segmentation-3.0; see README "講者分群" section for setup.
+diarize = [
+    "pyannote.audio>=3.1,<4",
+]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
