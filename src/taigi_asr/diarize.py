@@ -110,17 +110,14 @@ def _patch_speechbrain_lazy_module() -> None:
                 if self.package is None:
                     self.lazy_module = _importlib.import_module(self.target)
                 else:
-                    self.lazy_module = _importlib.import_module(
-                        f".{self.target}", self.package
-                    )
+                    self.lazy_module = _importlib.import_module(f".{self.target}", self.package)
             except Exception as exc:  # pragma: no cover
-                raise ImportError(
-                    f"Lazy import of {repr(self)} failed"
-                ) from exc
+                raise ImportError(f"Lazy import of {repr(self)} failed") from exc
         return self.lazy_module
 
     _sb_iu.LazyModule.ensure_module = patched_ensure_module
     _sb_iu.LazyModule._taigi_patched = True
+
 
 log = logging.getLogger(__name__)
 
@@ -152,9 +149,7 @@ class DiarizationPipeline:
     def __init__(self, device: str = "cuda", hf_token: str | None = None) -> None:
         self.device = device
         self.hf_token = (
-            hf_token
-            or os.environ.get("HF_TOKEN")
-            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         )
         self._pipeline = None
         self._loaded = False
@@ -216,12 +211,7 @@ class DiarizationPipeline:
                 # exception class depends on huggingface_hub version (GatedRepoError,
                 # HfHubHTTPError, requests.HTTPError); matching on the message
                 # text is the version-stable signal.
-                if (
-                    "gated" in lower
-                    or "401" in msg
-                    or "403" in msg
-                    or "unauthorized" in lower
-                ):
+                if "gated" in lower or "401" in msg or "403" in msg or "unauthorized" in lower:
                     raise ModelLoadError(
                         f"License acceptance required for {self.PIPELINE_ID}. "
                         "Visit https://huggingface.co/pyannote/speaker-diarization-3.1 "
@@ -230,9 +220,7 @@ class DiarizationPipeline:
                         "'Agree and access repository' on each, then retry. "
                         f"(Upstream error: {exc})"
                     ) from exc
-                raise ModelLoadError(
-                    f"Failed to load {self.PIPELINE_ID}: {exc}"
-                ) from exc
+                raise ModelLoadError(f"Failed to load {self.PIPELINE_ID}: {exc}") from exc
 
     def is_loaded(self) -> bool:
         return self._loaded
@@ -253,9 +241,7 @@ class DiarizationPipeline:
             self.load()
         with self._lock:
             if self._pipeline is None:
-                raise TranscriptionError(
-                    "pipeline unloaded before run() could acquire it"
-                )
+                raise TranscriptionError("pipeline unloaded before run() could acquire it")
 
             kw: dict = {}
             if num_speakers is not None:
@@ -364,15 +350,12 @@ def turns_to_rttm(turns: list[SpeakerTurn], uri: str) -> str:
     label produces a file ``parse_rttm`` will silently truncate).
     """
     if not uri or not _RTTM_SAFE_RE.match(uri):
-        raise ValueError(
-            f"uri must be non-empty and whitespace-free, got {uri!r}"
-        )
+        raise ValueError(f"uri must be non-empty and whitespace-free, got {uri!r}")
     lines = []
     for t in turns:
         if not _RTTM_SAFE_RE.match(t.speaker):
             raise ValueError(
-                f"speaker label must be non-empty and whitespace-free, "
-                f"got {t.speaker!r}"
+                f"speaker label must be non-empty and whitespace-free, got {t.speaker!r}"
             )
         if t.duration <= 0:
             # NIST RTTM consumers (dscore, pyannote.metrics) reject or silently
@@ -383,8 +366,7 @@ def turns_to_rttm(turns: list[SpeakerTurn], uri: str) -> str:
                 f"speaker={t.speaker!r} start={t.start}"
             )
         lines.append(
-            f"SPEAKER {uri} 1 {t.start:.3f} {t.duration:.3f} "
-            f"<NA> <NA> {t.speaker} <NA> <NA>"
+            f"SPEAKER {uri} 1 {t.start:.3f} {t.duration:.3f} <NA> <NA> {t.speaker} <NA> <NA>"
         )
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -428,9 +410,6 @@ def format_speaker_totals(
     totals: dict[str, float] = {}
     for t in turns:
         totals[t.speaker] = totals.get(t.speaker, 0.0) + t.duration
-    rows = [
-        (spk, secs, 100 * secs / max(total_duration, 1e-9))
-        for spk, secs in totals.items()
-    ]
+    rows = [(spk, secs, 100 * secs / max(total_duration, 1e-9)) for spk, secs in totals.items()]
     rows.sort(key=lambda r: -r[1])
     return rows

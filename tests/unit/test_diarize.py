@@ -71,7 +71,7 @@ class TestAttributeSpeakers:
         segs = [_seg(0, 100)]
         turns = [
             SpeakerTurn(50, 90, "B"),  # B should dominate (40s)
-            SpeakerTurn(0, 30, "A"),   # A is shorter (30s)
+            SpeakerTurn(0, 30, "A"),  # A is shorter (30s)
         ]
         out = attribute_speakers(segs, turns)
         assert out[0].speaker == "B"
@@ -98,9 +98,7 @@ class TestRttmRoundtrip:
         import tempfile
         from pathlib import Path
 
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".rttm", delete=False, encoding="utf-8"
-        ) as fh:
+        with tempfile.NamedTemporaryFile("w", suffix=".rttm", delete=False, encoding="utf-8") as fh:
             fh.write(rttm)
             tmp_path = Path(fh.name)
         try:
@@ -142,9 +140,7 @@ class TestRttmRoundtrip:
             "SPEAKER mtg 1 5.000 -3.000 <NA> <NA> SPEAKER_NEG <NA> <NA>\n"
             "SPEAKER mtg 1 6.000 2.500 <NA> <NA> SPEAKER_01 <NA> <NA>\n"
         )
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".rttm", delete=False, encoding="utf-8"
-        ) as fh:
+        with tempfile.NamedTemporaryFile("w", suffix=".rttm", delete=False, encoding="utf-8") as fh:
             fh.write(body)
             tmp = Path(fh.name)
         try:
@@ -165,9 +161,7 @@ class TestRttmRoundtrip:
         )
         # Explicit BOM bytes, then UTF-8 body.
         raw = "﻿" + body
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".rttm", delete=False, encoding="utf-8"
-        ) as fh:
+        with tempfile.NamedTemporaryFile("w", suffix=".rttm", delete=False, encoding="utf-8") as fh:
             fh.write(raw)
             tmp = Path(fh.name)
         try:
@@ -338,9 +332,7 @@ class TestDiarizationPipelineErrorMapping:
             "403 Client Error: Forbidden",
         ],
     )
-    def test_gated_repo_error_gets_license_hint(
-        self, monkeypatch, upstream_msg: str
-    ) -> None:
+    def test_gated_repo_error_gets_license_hint(self, monkeypatch, upstream_msg: str) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
 

@@ -93,8 +93,7 @@ def main() -> int:
 
     audio_span = max(s.end_time for s in segments)
     print(
-        f"SRT: {len(segments)} segments, span ~{audio_span:.0f}s | "
-        f"RTTM: {len(turns)} turns",
+        f"SRT: {len(segments)} segments, span ~{audio_span:.0f}s | RTTM: {len(turns)} turns",
         file=sys.stderr,
     )
 

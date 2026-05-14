@@ -337,16 +337,16 @@ def main(argv: list[str] | None = None) -> int:
     speaker_flag_set = _has_any_speaker_flag(args)
     if speaker_flag_set and not args.diarize:
         print(
-            "WARNING: --num-speakers/--min-speakers/--max-speakers are ignored "
-            "without --diarize.",
+            "WARNING: --num-speakers/--min-speakers/--max-speakers are ignored without --diarize.",
             file=sys.stderr,
         )
-    if args.diarize and args.num_speakers is not None and (
-        args.min_speakers is not None or args.max_speakers is not None
+    if (
+        args.diarize
+        and args.num_speakers is not None
+        and (args.min_speakers is not None or args.max_speakers is not None)
     ):
         print(
-            "ERROR: --num-speakers is mutually exclusive with "
-            "--min-speakers/--max-speakers.",
+            "ERROR: --num-speakers is mutually exclusive with --min-speakers/--max-speakers.",
             file=sys.stderr,
         )
         return 6
@@ -356,8 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         and args.min_speakers > args.max_speakers
     ):
         print(
-            f"ERROR: --min-speakers ({args.min_speakers}) > --max-speakers "
-            f"({args.max_speakers})",
+            f"ERROR: --min-speakers ({args.min_speakers}) > --max-speakers ({args.max_speakers})",
             file=sys.stderr,
         )
         return 6
@@ -446,9 +445,7 @@ def main(argv: list[str] | None = None) -> int:
         # Two-pass orchestration: ASR all files first, unload to free VRAM,
         # then diarize. Necessary on 4 GB cards where ASR (~2.9 GB peak) and
         # pyannote (~700-900 MB) can't co-reside.
-        asr_results: list[
-            tuple[Path, list[TimestampedSegment], Path, float, float]
-        ] = []
+        asr_results: list[tuple[Path, list[TimestampedSegment], Path, float, float]] = []
         # Tracked separately from asr_results so the cleanup loop runs even
         # when the diarize stage clears asr_results on load failure.
         wavs_to_cleanup: list[Path] = []
@@ -520,9 +517,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "diarize_error": str(exc),
                             }
                             try:
-                                _write_outputs(
-                                    audio, segs, formats, single_out_path, meta
-                                )
+                                _write_outputs(audio, segs, formats, single_out_path, meta)
                             except OSError as werr:  # pragma: no cover
                                 print(
                                     f"ERROR [{audio.name}] write fallback: {werr}",
@@ -543,17 +538,13 @@ def main(argv: list[str] | None = None) -> int:
                                 "diarized": True,
                                 "num_speakers": n_spk,
                             }
-                            _write_outputs(
-                                audio, attributed, formats, single_out_path, meta
-                            )
+                            _write_outputs(audio, attributed, formats, single_out_path, meta)
                             # Companion RTTM — same basename as the audio so
                             # downstream tooling (merger, NIST tools) finds it
                             # next to the transcript.
                             rttm_path = audio.with_suffix(".rttm")
                             uri = "_".join(audio.stem.split())
-                            rttm_path.write_text(
-                                turns_to_rttm(turns, uri), encoding="utf-8"
-                            )
+                            rttm_path.write_text(turns_to_rttm(turns, uri), encoding="utf-8")
                             print(f"[OK] Saved: {rttm_path}", file=sys.stderr)
                             total_elapsed = asr_elapsed + dia_elapsed
                             success_duration += duration

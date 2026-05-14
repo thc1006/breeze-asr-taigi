@@ -136,17 +136,13 @@ def test_diarize_load_failure_falls_back_to_unattributed_asr(
         return fake_wav, 1.0
 
     monkeypatch.setattr(cli_mod.AudioConverter, "convert", staticmethod(fake_convert))
-    monkeypatch.setattr(
-        cli_mod.AudioConverter, "cleanup", staticmethod(lambda p: None)
-    )
+    monkeypatch.setattr(cli_mod.AudioConverter, "cleanup", staticmethod(lambda p: None))
 
     monkeypatch.setattr(
         cli_mod.GPUProfiler,
         "detect",
         staticmethod(
-            lambda: GPUInfo(
-                name="FakeGPU", vram_gb=4.0, cuda_available=True, bf16_supported=False
-            )
+            lambda: GPUInfo(name="FakeGPU", vram_gb=4.0, cuda_available=True, bf16_supported=False)
         ),
     )
 

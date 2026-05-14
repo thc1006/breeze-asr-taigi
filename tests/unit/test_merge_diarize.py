@@ -38,13 +38,7 @@ def _write_rttm(path: Path, content: str) -> None:
 
 
 SAMPLE_SRT = (
-    "1\n"
-    "00:00:00,000 --> 00:00:03,000\n"
-    "你好嗎\n"
-    "\n"
-    "2\n"
-    "00:00:03,500 --> 00:00:06,000\n"
-    "我很好\n"
+    "1\n00:00:00,000 --> 00:00:03,000\n你好嗎\n\n2\n00:00:03,500 --> 00:00:06,000\n我很好\n"
 )
 
 SAMPLE_RTTM = (
@@ -54,9 +48,7 @@ SAMPLE_RTTM = (
 
 
 class TestMergeDiarizeOutputPaths:
-    def test_default_prefix_writes_diarized_sidecars(
-        self, tmp_path: Path, merge_module
-    ) -> None:
+    def test_default_prefix_writes_diarized_sidecars(self, tmp_path: Path, merge_module) -> None:
         srt = tmp_path / "audio.srt"
         rttm = tmp_path / "audio.rttm"
         _write_srt(srt, SAMPLE_SRT)
@@ -103,9 +95,7 @@ class TestMergeDiarizeOutputPaths:
         # Input SRT must be unchanged.
         assert srt.read_text(encoding="utf-8") == SAMPLE_SRT
 
-    def test_utf8_bom_in_srt_is_tolerated(
-        self, tmp_path: Path, merge_module
-    ) -> None:
+    def test_utf8_bom_in_srt_is_tolerated(self, tmp_path: Path, merge_module) -> None:
         """A UTF-8 BOM at SRT start must not silently drop cue #1."""
         srt = tmp_path / "audio.srt"
         rttm = tmp_path / "audio.rttm"

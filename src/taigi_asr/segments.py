@@ -94,11 +94,7 @@ class TimestampedSegment:
         if self.speaker is None:
             body = self.text
         else:
-            safe_spk = (
-                self.speaker.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-            )
+            safe_spk = self.speaker.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             body = f"<v {safe_spk}>{self.text}"
         return f"{start} --> {end}\n{body}\n"
 

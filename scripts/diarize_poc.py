@@ -90,8 +90,7 @@ def main() -> int:
         with timeline_path.open("w", encoding="utf-8") as fh:
             for t in turns:
                 fh.write(
-                    f"[{_human(t.start)} - {_human(t.end)}] "
-                    f"{t.speaker}  ({t.duration:.1f}s)\n"
+                    f"[{_human(t.start)} - {_human(t.end)}] {t.speaker}  ({t.duration:.1f}s)\n"
                 )
         print(f"[OK] Timeline: {timeline_path}", file=sys.stderr)
 
