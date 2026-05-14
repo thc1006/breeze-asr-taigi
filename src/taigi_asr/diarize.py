@@ -24,7 +24,6 @@ import torch
 from taigi_asr.errors import ModelLoadError, TranscriptionError
 from taigi_asr.segments import TimestampedSegment
 
-
 # Serializes the global ``torch.load`` patch so two concurrent
 # DiarizationPipeline.load() calls don't capture each other's patched
 # version as the "original" and leak the patch on restore.
@@ -99,7 +98,8 @@ def _patch_speechbrain_lazy_module() -> None:
             importer_frame = _inspect.getframeinfo(sys._getframe(stacklevel + 1))
         except (AttributeError, ValueError):  # pragma: no cover
             _warnings.warn(
-                "Failed to inspect frame for speechbrain lazy import bypass."
+                "Failed to inspect frame for speechbrain lazy import bypass.",
+                stacklevel=2,
             )
         if importer_frame is not None and importer_frame.filename.endswith(
             ("/inspect.py", "\\inspect.py")
@@ -210,6 +210,26 @@ class DiarizationPipeline:
             except ModelLoadError:
                 raise
             except Exception as exc:
+                msg = str(exc)
+                lower = msg.lower()
+                # Targeted hint when HF returned 401/403/gated. The upstream
+                # exception class depends on huggingface_hub version (GatedRepoError,
+                # HfHubHTTPError, requests.HTTPError); matching on the message
+                # text is the version-stable signal.
+                if (
+                    "gated" in lower
+                    or "401" in msg
+                    or "403" in msg
+                    or "unauthorized" in lower
+                ):
+                    raise ModelLoadError(
+                        f"License acceptance required for {self.PIPELINE_ID}. "
+                        "Visit https://huggingface.co/pyannote/speaker-diarization-3.1 "
+                        "AND https://huggingface.co/pyannote/segmentation-3.0 with "
+                        "the same HF account that owns HF_TOKEN, click "
+                        "'Agree and access repository' on each, then retry. "
+                        f"(Upstream error: {exc})"
+                    ) from exc
                 raise ModelLoadError(
                     f"Failed to load {self.PIPELINE_ID}: {exc}"
                 ) from exc

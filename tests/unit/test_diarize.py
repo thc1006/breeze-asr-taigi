@@ -94,11 +94,9 @@ class TestRttmRoundtrip:
             SpeakerTurn(5.5, 10.25, "SPEAKER_01"),
         ]
         rttm = turns_to_rttm(turns, uri="test_audio")
-        out, tmp = [], []
-        # Write/read via tmpfile equivalent — parse_rttm reads from disk, but
-        # we can construct via splitlines pass-through with a tiny helper:
-        from pathlib import Path
+        # parse_rttm reads from disk; tmpfile is the simplest round-trip rig.
         import tempfile
+        from pathlib import Path
 
         with tempfile.NamedTemporaryFile(
             "w", suffix=".rttm", delete=False, encoding="utf-8"
@@ -135,8 +133,8 @@ class TestRttmRoundtrip:
 
     def test_parse_rttm_skips_non_positive_duration(self) -> None:
         """Symmetric with turns_to_rttm: read-path drops bad rows silently."""
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
 
         body = (
             "SPEAKER mtg 1 0.000 5.000 <NA> <NA> SPEAKER_00 <NA> <NA>\n"
@@ -158,8 +156,8 @@ class TestRttmRoundtrip:
 
     def test_parse_rttm_handles_utf8_bom(self) -> None:
         """A BOM-prefixed RTTM (Windows tooling) must not silently drop cue #1."""
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
 
         body = (
             "SPEAKER mtg 1 0.000 5.500 <NA> <NA> SPEAKER_00 <NA> <NA>\n"
@@ -235,3 +233,146 @@ class TestSegmentSpeakerRendering:
         # Backward compat: existing consumers see the exact same shape.
         s = _seg(0, 1, "hi")
         assert s.to_json_dict() == {"start": 0.0, "end": 1.0, "text": "hi"}
+
+
+class TestTorchLoadPatch:
+    """`_torch_load_weights_only_false` must force ``weights_only=False`` for
+    the duration of the context and restore the original on exit — including
+    on exception. The patch is what makes pyannote 3.4's Lightning checkpoint
+    load under PyTorch 2.6; an unrestored leak would silently degrade safety
+    elsewhere in the process (the safer default exists for a reason)."""
+
+    def test_patch_forces_weights_only_false_and_restores(self) -> None:
+        import torch
+
+        from taigi_asr.diarize import _torch_load_weights_only_false
+
+        # Install a spy as the "real" torch.load BEFORE entering the context so
+        # the patched wrapper captures it as ``original`` and we can verify the
+        # weights_only override actually reaches the underlying load call.
+        original_real = torch.load
+        captured: list[dict] = []
+
+        def spy(*args, **kwargs):
+            captured.append(dict(kwargs))
+            return "loaded"
+
+        torch.load = spy  # type: ignore[assignment]
+        try:
+            with _torch_load_weights_only_false():
+                # Inside context, torch.load is the patched wrapper around spy.
+                assert torch.load is not spy
+                # Caller asks for weights_only=True; the wrapper must overrule it.
+                torch.load("any", weights_only=True)
+            # On exit, our spy must be restored (not original_real — the context
+            # captures whatever was current at __enter__).
+            assert torch.load is spy
+        finally:
+            torch.load = original_real  # type: ignore[assignment]
+
+        assert captured == [{"weights_only": False}]
+
+    def test_patch_restores_on_exception(self) -> None:
+        import torch
+
+        from taigi_asr.diarize import _torch_load_weights_only_false
+
+        original = torch.load
+        with pytest.raises(RuntimeError, match="simulated"):
+            with _torch_load_weights_only_false():
+                raise RuntimeError("simulated pyannote load failure")
+        assert torch.load is original
+
+
+class TestSpeechbrainWinPatch:
+    """`_patch_speechbrain_lazy_module` must:
+    - be a no-op on POSIX (so upstream speechbrain fixes aren't masked)
+    - be idempotent on win32 (re-call doesn't double-patch)
+    - leave the `_taigi_patched` sentinel on the class
+
+    We exercise the public surface only — no LazyModule object construction,
+    no monkey of speechbrain internals beyond what the patcher itself touches.
+    """
+
+    def test_noop_on_posix(self, monkeypatch) -> None:
+        from taigi_asr.diarize import _patch_speechbrain_lazy_module
+
+        monkeypatch.setattr("sys.platform", "linux")
+        # Should not raise even when speechbrain isn't importable in this
+        # subprocess, because the early-return runs before the import.
+        _patch_speechbrain_lazy_module()  # no exception
+
+    def test_idempotent_on_win32(self, monkeypatch) -> None:
+        try:
+            from speechbrain.utils import importutils as sb_iu
+        except ImportError:
+            pytest.skip("speechbrain not installed in this environment")
+
+        from taigi_asr.diarize import _patch_speechbrain_lazy_module
+
+        monkeypatch.setattr("sys.platform", "win32")
+        # Clear any pre-existing sentinel so we can test a fresh apply +
+        # second-call no-op.
+        if hasattr(sb_iu.LazyModule, "_taigi_patched"):
+            monkeypatch.delattr(sb_iu.LazyModule, "_taigi_patched", raising=False)
+
+        _patch_speechbrain_lazy_module()
+        assert getattr(sb_iu.LazyModule, "_taigi_patched", False) is True
+        first_method = sb_iu.LazyModule.ensure_module
+
+        # Second call: must short-circuit on the sentinel, leaving the method
+        # object the same identity (not re-wrapped).
+        _patch_speechbrain_lazy_module()
+        assert sb_iu.LazyModule.ensure_module is first_method
+
+
+class TestDiarizationPipelineErrorMapping:
+    """`DiarizationPipeline.load()` should surface license-acceptance errors
+    with a targeted message — distinct from the generic 'failed to load'."""
+
+    @pytest.mark.parametrize(
+        "upstream_msg",
+        [
+            "Cannot access gated repo for url ...",
+            "401 Client Error: Unauthorized for url",
+            "403 Client Error: Forbidden",
+        ],
+    )
+    def test_gated_repo_error_gets_license_hint(
+        self, monkeypatch, upstream_msg: str
+    ) -> None:
+        from taigi_asr.diarize import DiarizationPipeline
+        from taigi_asr.errors import ModelLoadError
+
+        class _FakePipelineModule:
+            class Pipeline:
+                @staticmethod
+                def from_pretrained(*a, **kw):
+                    raise RuntimeError(upstream_msg)
+
+        # The import inside load() is ``from pyannote.audio import Pipeline``;
+        # injecting a fake module makes the targeted-error branch reachable
+        # without pyannote actually attempting any network/auth work.
+        monkeypatch.setitem(__import__("sys").modules, "pyannote.audio", _FakePipelineModule)
+
+        d = DiarizationPipeline(hf_token="hf_dummy_token")
+        with pytest.raises(ModelLoadError, match="License acceptance required"):
+            d.load()
+
+    def test_other_errors_use_generic_message(self, monkeypatch) -> None:
+        from taigi_asr.diarize import DiarizationPipeline
+        from taigi_asr.errors import ModelLoadError
+
+        class _FakePipelineModule:
+            class Pipeline:
+                @staticmethod
+                def from_pretrained(*a, **kw):
+                    raise RuntimeError("disk full")
+
+        monkeypatch.setitem(__import__("sys").modules, "pyannote.audio", _FakePipelineModule)
+
+        d = DiarizationPipeline(hf_token="hf_dummy_token")
+        with pytest.raises(ModelLoadError, match="Failed to load") as exc_info:
+            d.load()
+        # The targeted-license branch must NOT swallow unrelated errors.
+        assert "License acceptance required" not in str(exc_info.value)
