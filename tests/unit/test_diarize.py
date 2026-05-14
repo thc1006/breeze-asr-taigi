@@ -130,12 +130,21 @@ class TestRttmRoundtrip:
             turns_to_rttm([SpeakerTurn(5.0, 3.0, "A")], uri="ok")
 
     def test_parse_rttm_skips_non_positive_duration(self) -> None:
-        """Symmetric with turns_to_rttm: read-path drops bad rows silently."""
+        """Symmetric with turns_to_rttm: read-path drops bad rows silently.
+
+        Also exercises three other skip branches in parse_rttm: non-SPEAKER
+        rows (e.g. comments), too-few columns (malformed), and unparseable
+        float timestamps. All four bad-row classes must be dropped silently
+        without raising — third-party RTTM tolerance is the contract.
+        """
         import tempfile
         from pathlib import Path
 
         body = (
+            "# comment row — must be skipped (not SPEAKER prefix)\n"
             "SPEAKER mtg 1 0.000 5.000 <NA> <NA> SPEAKER_00 <NA> <NA>\n"
+            "SPEAKER too few cols\n"
+            "SPEAKER mtg 1 not_a_float 1.0 <NA> <NA> SPEAKER_BAD <NA> <NA>\n"
             "SPEAKER mtg 1 5.000 0.000 <NA> <NA> SPEAKER_BAD <NA> <NA>\n"
             "SPEAKER mtg 1 5.000 -3.000 <NA> <NA> SPEAKER_NEG <NA> <NA>\n"
             "SPEAKER mtg 1 6.000 2.500 <NA> <NA> SPEAKER_01 <NA> <NA>\n"
@@ -350,6 +359,12 @@ class TestDiarizationPipelineErrorMapping:
         d = DiarizationPipeline(hf_token="hf_dummy_token")
         with pytest.raises(ModelLoadError, match="License acceptance required"):
             d.load()
+
+    def test_is_loaded_false_before_load(self) -> None:
+        from taigi_asr.diarize import DiarizationPipeline
+
+        d = DiarizationPipeline(hf_token="dummy")
+        assert d.is_loaded() is False
 
     def test_load_raises_when_no_hf_token(self, monkeypatch) -> None:
         from taigi_asr.diarize import DiarizationPipeline

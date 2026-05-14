@@ -258,6 +258,92 @@ def test_diarize_happy_path_writes_attributed_srt_and_rttm(
     assert "SPEAKER_00" in rttm_body and "SPEAKER_01" in rttm_body
 
 
+class _SpeakerCountCapturingPipeline:
+    """Records kwargs from run() so we can assert --num-speakers / --min-speakers /
+    --max-speakers actually reach pyannote (covers cli.py:481-487)."""
+
+    PIPELINE_ID = "pyannote/speaker-diarization-3.1"
+    captured_kwargs: list[dict] = []
+
+    def __init__(self, *a, **kw) -> None:  # noqa: ARG002
+        self._loaded = False
+
+    def load(self) -> None:
+        self._loaded = True
+
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def run(self, wav_path, **kw):  # noqa: ARG002
+        from taigi_asr.diarize import SpeakerTurn
+
+        self.__class__.captured_kwargs.append(dict(kw))
+        return [SpeakerTurn(start=0.0, end=1.0, speaker="SPEAKER_00")]
+
+    def unload(self) -> None:
+        self._loaded = False
+
+
+def test_diarize_passes_speaker_count_constraints_through(tmp_path: Path, monkeypatch) -> None:
+    """--num-speakers / --min-speakers / --max-speakers must reach
+    DiarizationPipeline.run() as kwargs. Three sub-cases, one per flag."""
+    import taigi_asr.cli as cli_mod
+    import taigi_asr.diarize as dia_mod
+    import taigi_asr.engines.fake as fake_mod
+    from taigi_asr.router import GPUInfo
+
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"\x00" * 32)
+    fake_wav = tmp_path / "_fake_16k.wav"
+    fake_wav.write_bytes(b"\x00" * 32)
+
+    monkeypatch.setattr(
+        cli_mod.AudioConverter,
+        "convert",
+        staticmethod(lambda src, out_dir=None: (fake_wav, 1.0)),
+    )
+    monkeypatch.setattr(cli_mod.AudioConverter, "cleanup", staticmethod(lambda p: None))
+    monkeypatch.setattr(
+        cli_mod.GPUProfiler,
+        "detect",
+        staticmethod(
+            lambda: GPUInfo(name="FakeGPU", vram_gb=4.0, cuda_available=True, bf16_supported=False)
+        ),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "build_engine",
+        lambda spec: fake_mod.FakeEngine(
+            script=[TimestampedSegment(start_time=0.0, end_time=1.0, text="x")]
+        ),
+    )
+    monkeypatch.setattr(dia_mod, "DiarizationPipeline", _SpeakerCountCapturingPipeline)
+
+    # Reset class-level captured kwargs across the three sub-cases.
+    _SpeakerCountCapturingPipeline.captured_kwargs = []
+
+    # --num-speakers — covers cli.py:481-483.
+    rc1 = cli_mod.main(
+        [str(audio), "--diarize", "--engine", "fw", "--format", "srt", "--num-speakers", "2"]
+    )
+    assert rc1 == 0
+    assert _SpeakerCountCapturingPipeline.captured_kwargs[-1] == {"num_speakers": 2}
+
+    # --min-speakers — covers cli.py:484-485.
+    rc2 = cli_mod.main(
+        [str(audio), "--diarize", "--engine", "fw", "--format", "srt", "--min-speakers", "3"]
+    )
+    assert rc2 == 0
+    assert _SpeakerCountCapturingPipeline.captured_kwargs[-1] == {"min_speakers": 3}
+
+    # --max-speakers — covers cli.py:486-487.
+    rc3 = cli_mod.main(
+        [str(audio), "--diarize", "--engine", "fw", "--format", "srt", "--max-speakers", "5"]
+    )
+    assert rc3 == 0
+    assert _SpeakerCountCapturingPipeline.captured_kwargs[-1] == {"max_speakers": 5}
+
+
 class _RunFailingDiarizationPipeline:
     """``load()`` succeeds but ``run()`` raises ``TranscriptionError`` — the
     exact shape of a real-world dia.run() per-file failure (VRAM OOM mid-batch,
