@@ -76,6 +76,31 @@ outputs/
 *_transcript.txt
 *_subtitle.srt
 
+# Diarization artifacts (RTTM, pyannote timelines, speaker-attributed sidecars)
+*.rttm
+*.speakers.txt
+*.diarized.srt
+*.diarized.txt
+*.diarized.json
+# Variant-comparison outputs from scripts/diarize_compare.py.
+# Patterns are narrow to the actual artifact extensions so they don't
+# accidentally match unrelated files (e.g. ``model.binary.png``).
+*.binary.rttm
+*.binary.speakers.txt
+*.binary.diarized.srt
+*.binary.diarized.txt
+*.binary.diarized.json
+*.ternary.rttm
+*.ternary.speakers.txt
+*.ternary.diarized.srt
+*.ternary.diarized.txt
+*.ternary.diarized.json
+*.auto.rttm
+*.auto.speakers.txt
+*.auto.diarized.srt
+*.auto.diarized.txt
+*.auto.diarized.json
+
 # User-provided audio (except test fixture)
 *.m4a
 *.mp3
@@ -104,3 +129,7 @@ test_mp3_transcript.*
 tmp/
 temp/
 *.tmp
+*.json
+music/*
+*.mp3codecov/patch
+codecov/patch — 19.40% of diff hit (target 59.48%)
