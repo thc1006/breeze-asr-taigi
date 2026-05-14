@@ -177,6 +177,8 @@ segments = engine.transcribe("audio.m4a")
 
 `--diarize` 在 ASR 之後再跑一遍 [`pyannote/speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1)，把每段 ASR 文字附上 `SPEAKER_NN` 標籤。整個 pipeline 是 **序列載入**：ASR 跑完 → `engine.unload()` 釋放 VRAM → pyannote 載入 → diarize → 對齊文字。這樣 4 GB 卡也能跑完整 stack，不會兩個模型一起擠 GPU 而 OOM。
 
+> **UI 範圍**：本功能目前 **僅 CLI 提供**。Gradio Web UI（`start.bat` / `start.sh`）尚未接上 `--diarize`，從 UI 啟動的轉錄沒有 speaker 標籤。需要 diarize 的場景請走 CLI 或 `scripts/` 下的 standalone 工具。
+
 ### 一次性設定（HuggingFace token + license）
 
 1. 在 [HuggingFace tokens](https://huggingface.co/settings/tokens) 建一個 read token，設環境變數 `HF_TOKEN`（或 `HUGGINGFACE_HUB_TOKEN`）。
