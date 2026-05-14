@@ -97,9 +97,51 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of candidates for temperature fallback sampling (default 5)",
     )
+    parser.add_argument(
+        "--diarize",
+        action="store_true",
+        help=(
+            "Attach pyannote/speaker-diarization-3.1 speaker labels to every "
+            "segment. Requires HF_TOKEN env var and license acceptance for "
+            "pyannote/speaker-diarization-3.1 + pyannote/segmentation-3.0. "
+            "Adds a sequential pass on the same GPU after ASR (ASR unloads "
+            "first to keep peak VRAM under 4 GB)."
+        ),
+    )
+    parser.add_argument(
+        "--num-speakers",
+        type=int,
+        default=None,
+        help="Exact speaker count for diarization (overrides auto-detect).",
+    )
+    parser.add_argument(
+        "--min-speakers",
+        type=int,
+        default=None,
+        help="Lower bound on speaker count (with --diarize).",
+    )
+    parser.add_argument(
+        "--max-speakers",
+        type=int,
+        default=None,
+        help="Upper bound on speaker count (with --diarize).",
+    )
     parser.add_argument("--verbose", "-v", action="count", default=0)
     parser.add_argument("--version", action="version", version=f"taigi-asr {__version__}")
     return parser
+
+
+def _has_any_speaker_flag(args) -> bool:
+    """True iff at least one diarization speaker-count knob was supplied.
+
+    Extracted so the warning-without-diarize path can be unit-tested directly
+    without spinning up the full main() (which would proceed to engine load).
+    """
+    return (
+        args.num_speakers is not None
+        or args.min_speakers is not None
+        or args.max_speakers is not None
+    )
 
 
 def _resolve_inputs(positional: list[Path], input_dir: Path | None) -> list[Path]:
@@ -149,6 +191,25 @@ def _render(segments, fmt: str, meta: dict) -> str:
     raise ValueError(fmt)
 
 
+def _write_outputs(
+    audio: Path,
+    segments,
+    formats: list[str],
+    single_out_path: Path | None,
+    meta: dict,
+) -> None:
+    """Render + persist outputs for one input. Pure I/O — segments are already
+    finalized (and possibly speaker-attributed) before this is called."""
+    if single_out_path is not None:
+        single_out_path.write_text(_render(segments, formats[0], meta), encoding="utf-8")
+        print(f"[OK] Saved: {single_out_path}", file=sys.stderr)
+    else:
+        for fmt in formats:
+            out_path = audio.with_suffix(f".{fmt}")
+            out_path.write_text(_render(segments, fmt, meta), encoding="utf-8")
+            print(f"[OK] Saved: {out_path}", file=sys.stderr)
+
+
 def _transcribe_one(
     engine,
     audio: Path,
@@ -190,17 +251,41 @@ def _transcribe_one(
         return False, duration, time.monotonic() - t0
 
     meta = {**meta_base, "duration_sec": round(duration, 2)}
-
-    if single_out_path is not None:
-        single_out_path.write_text(_render(segments, formats[0], meta), encoding="utf-8")
-        print(f"[OK] Saved: {single_out_path}", file=sys.stderr)
-    else:
-        for fmt in formats:
-            out_path = audio.with_suffix(f".{fmt}")
-            out_path.write_text(_render(segments, fmt, meta), encoding="utf-8")
-            print(f"[OK] Saved: {out_path}", file=sys.stderr)
-
+    _write_outputs(audio, segments, formats, single_out_path, meta)
     return True, duration, time.monotonic() - t0
+
+
+def _asr_keep_wav(
+    engine,
+    audio: Path,
+    transcribe_kwargs: dict,
+):
+    """ASR-only variant of _transcribe_one for the --diarize pipeline.
+
+    Converts the audio and runs the ASR engine, but does NOT clean up the WAV
+    or write outputs — diarization needs the same 16 kHz WAV later. Returns
+    ``(ok, segments, wav_path, duration, elapsed)``; on failure the WAV (if
+    created) is cleaned up immediately and ``wav_path`` is None.
+    """
+    t0 = time.monotonic()
+    wav_path = None
+    duration = 0.0
+    try:
+        wav_path, duration = AudioConverter.convert(audio)
+        print(f"Audio duration: {duration:.1f} s", file=sys.stderr)
+        segments = engine.transcribe(wav_path, **transcribe_kwargs)
+    except TaigiASRError as exc:
+        print(f"ERROR [{audio.name}]: {exc}", file=sys.stderr)
+        if wav_path is not None:
+            AudioConverter.cleanup(wav_path)
+        return False, [], None, duration, time.monotonic() - t0
+
+    if not segments:
+        print(f"WARNING [{audio.name}]: empty transcript", file=sys.stderr)
+        AudioConverter.cleanup(wav_path)
+        return False, [], None, duration, time.monotonic() - t0
+
+    return True, segments, wav_path, duration, time.monotonic() - t0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,6 +324,36 @@ def main(argv: list[str] | None = None) -> int:
     bad = [f for f in formats if f not in valid]
     if bad:
         print(f"ERROR: unknown format(s): {bad}. Choose from {sorted(valid)}", file=sys.stderr)
+        return 6
+
+    # Diarization flag validation — surface user mistakes before we burn 5+
+    # minutes of GPU time.
+    speaker_flag_set = _has_any_speaker_flag(args)
+    if speaker_flag_set and not args.diarize:
+        print(
+            "WARNING: --num-speakers/--min-speakers/--max-speakers are ignored "
+            "without --diarize.",
+            file=sys.stderr,
+        )
+    if args.diarize and args.num_speakers is not None and (
+        args.min_speakers is not None or args.max_speakers is not None
+    ):
+        print(
+            "ERROR: --num-speakers is mutually exclusive with "
+            "--min-speakers/--max-speakers.",
+            file=sys.stderr,
+        )
+        return 6
+    if (
+        args.min_speakers is not None
+        and args.max_speakers is not None
+        and args.min_speakers > args.max_speakers
+    ):
+        print(
+            f"ERROR: --min-speakers ({args.min_speakers}) > --max-speakers "
+            f"({args.max_speakers})",
+            file=sys.stderr,
+        )
         return 6
 
     info = GPUProfiler.detect()
@@ -320,31 +435,171 @@ def main(argv: list[str] | None = None) -> int:
     # mislead the user about real throughput.
     success_duration = 0.0
     success_elapsed = 0.0
-    try:
-        for idx, audio in enumerate(inputs, 1):
-            if len(inputs) > 1:
-                print(f"\n[{idx}/{len(inputs)}] {audio}", file=sys.stderr)
-            ok, duration, elapsed = _transcribe_one(
-                engine,
-                audio,
-                formats,
-                single_out_path,
-                transcribe_kwargs,
-                meta_base,
-            )
-            if ok:
-                success_duration += duration
-                success_elapsed += elapsed
-                if len(inputs) > 1:
-                    xrt = duration / max(elapsed, 1e-3)
-                    print(f"  -> {elapsed:.1f}s (xRT {xrt:.1f})", file=sys.stderr)
-            else:
-                failed.append(audio)
-    finally:
+
+    if args.diarize:
+        # Two-pass orchestration: ASR all files first, unload to free VRAM,
+        # then diarize. Necessary on 4 GB cards where ASR (~2.9 GB peak) and
+        # pyannote (~700-900 MB) can't co-reside.
+        asr_results: list[
+            tuple[Path, list["TimestampedSegment"], Path, float, float]
+        ] = []
+        # Tracked separately from asr_results so the cleanup loop runs even
+        # when the diarize stage clears asr_results on load failure.
+        wavs_to_cleanup: list[Path] = []
         try:
-            engine.unload()
-        except Exception:  # pragma: no cover
-            pass
+            try:
+                for idx, audio in enumerate(inputs, 1):
+                    if len(inputs) > 1:
+                        print(f"\n[{idx}/{len(inputs)}] ASR: {audio}", file=sys.stderr)
+                    ok, segs, wav_path, duration, elapsed = _asr_keep_wav(
+                        engine, audio, transcribe_kwargs
+                    )
+                    if ok and wav_path is not None:
+                        asr_results.append((audio, segs, wav_path, duration, elapsed))
+                        wavs_to_cleanup.append(wav_path)
+                    else:
+                        failed.append(audio)
+            finally:
+                try:
+                    engine.unload()
+                except Exception:  # pragma: no cover
+                    pass
+
+            if asr_results:
+                # Defer the diarize module import until after ASR has run and
+                # been unloaded: pyannote.audio pulls in extra deps and using
+                # it before unload races against the 4 GB VRAM budget.
+                from taigi_asr.diarize import (
+                    DiarizationPipeline,
+                    attribute_speakers,
+                    turns_to_rttm,
+                )
+
+                diarize_kwargs: dict = {}
+                if args.num_speakers is not None:
+                    diarize_kwargs["num_speakers"] = args.num_speakers
+                if args.min_speakers is not None:
+                    diarize_kwargs["min_speakers"] = args.min_speakers
+                if args.max_speakers is not None:
+                    diarize_kwargs["max_speakers"] = args.max_speakers
+
+                dia = DiarizationPipeline()
+                try:
+                    print(
+                        "\nLoading pyannote/speaker-diarization-3.1 on cuda...",
+                        file=sys.stderr,
+                    )
+                    try:
+                        dia.load()
+                    except TaigiASRError as exc:
+                        # Fallback: write un-attributed ASR transcripts so the
+                        # user doesn't lose the GPU time already spent on the
+                        # ASR pass. The CLI still exits non-zero (return 4
+                        # below via the failed[] list) so callers / CI scripts
+                        # can detect that --diarize didn't take effect, but
+                        # the transcripts on disk are intact.
+                        print(
+                            f"ERROR: diarize load failed: {exc}\n"
+                            "  -> falling back to un-attributed ASR transcripts "
+                            "(no speaker labels). Files marked as failed; CLI "
+                            "will exit with error code, but written outputs are "
+                            "usable.",
+                            file=sys.stderr,
+                        )
+                        for audio, segs, wav_path, duration, asr_elapsed in asr_results:
+                            meta = {
+                                **meta_base,
+                                "duration_sec": round(duration, 2),
+                                "diarized": False,
+                                "diarize_error": str(exc),
+                            }
+                            try:
+                                _write_outputs(
+                                    audio, segs, formats, single_out_path, meta
+                                )
+                            except OSError as werr:  # pragma: no cover
+                                print(
+                                    f"ERROR [{audio.name}] write fallback: {werr}",
+                                    file=sys.stderr,
+                                )
+                            failed.append(audio)
+                        asr_results = []
+                    for audio, segs, wav_path, duration, asr_elapsed in asr_results:
+                        try:
+                            t0 = time.monotonic()
+                            turns = dia.run(wav_path, **diarize_kwargs)
+                            dia_elapsed = time.monotonic() - t0
+                            attributed = attribute_speakers(segs, turns)
+                            n_spk = len({s.speaker for s in attributed if s.speaker})
+                            meta = {
+                                **meta_base,
+                                "duration_sec": round(duration, 2),
+                                "diarized": True,
+                                "num_speakers": n_spk,
+                            }
+                            _write_outputs(
+                                audio, attributed, formats, single_out_path, meta
+                            )
+                            # Companion RTTM — same basename as the audio so
+                            # downstream tooling (merger, NIST tools) finds it
+                            # next to the transcript.
+                            rttm_path = audio.with_suffix(".rttm")
+                            uri = "_".join(audio.stem.split())
+                            rttm_path.write_text(
+                                turns_to_rttm(turns, uri), encoding="utf-8"
+                            )
+                            print(f"[OK] Saved: {rttm_path}", file=sys.stderr)
+                            total_elapsed = asr_elapsed + dia_elapsed
+                            success_duration += duration
+                            success_elapsed += total_elapsed
+                            if len(inputs) > 1:
+                                xrt = duration / max(total_elapsed, 1e-3)
+                                print(
+                                    f"  -> ASR {asr_elapsed:.1f}s + "
+                                    f"diarize {dia_elapsed:.1f}s "
+                                    f"(xRT {xrt:.1f}, {n_spk} speakers)",
+                                    file=sys.stderr,
+                                )
+                        except TaigiASRError as exc:
+                            print(
+                                f"ERROR [{audio.name}] diarize: {exc}",
+                                file=sys.stderr,
+                            )
+                            failed.append(audio)
+                finally:
+                    try:
+                        dia.unload()
+                    except Exception:  # pragma: no cover
+                        pass
+        finally:
+            for wav_path in wavs_to_cleanup:
+                AudioConverter.cleanup(wav_path)
+    else:
+        try:
+            for idx, audio in enumerate(inputs, 1):
+                if len(inputs) > 1:
+                    print(f"\n[{idx}/{len(inputs)}] {audio}", file=sys.stderr)
+                ok, duration, elapsed = _transcribe_one(
+                    engine,
+                    audio,
+                    formats,
+                    single_out_path,
+                    transcribe_kwargs,
+                    meta_base,
+                )
+                if ok:
+                    success_duration += duration
+                    success_elapsed += elapsed
+                    if len(inputs) > 1:
+                        xrt = duration / max(elapsed, 1e-3)
+                        print(f"  -> {elapsed:.1f}s (xRT {xrt:.1f})", file=sys.stderr)
+                else:
+                    failed.append(audio)
+        finally:
+            try:
+                engine.unload()
+            except Exception:  # pragma: no cover
+                pass
 
     if len(inputs) > 1:
         ok_count = len(inputs) - len(failed)
