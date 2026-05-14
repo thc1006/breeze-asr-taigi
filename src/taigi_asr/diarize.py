@@ -92,11 +92,13 @@ def _patch_speechbrain_lazy_module() -> None:
     import inspect as _inspect
     import warnings as _warnings
 
-    def patched_ensure_module(self, stacklevel: int):
+    def patched_ensure_module(
+        self, stacklevel: int
+    ):  # pragma: no cover - exercised only by speechbrain's own LazyModule attribute access during pyannote load
         importer_frame = None
         try:
             importer_frame = _inspect.getframeinfo(sys._getframe(stacklevel + 1))
-        except (AttributeError, ValueError):  # pragma: no cover
+        except (AttributeError, ValueError):
             _warnings.warn(
                 "Failed to inspect frame for speechbrain lazy import bypass.",
                 stacklevel=2,
@@ -111,7 +113,7 @@ def _patch_speechbrain_lazy_module() -> None:
                     self.lazy_module = _importlib.import_module(self.target)
                 else:
                     self.lazy_module = _importlib.import_module(f".{self.target}", self.package)
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 raise ImportError(f"Lazy import of {repr(self)} failed") from exc
         return self.lazy_module
 
@@ -251,13 +253,13 @@ class DiarizationPipeline:
             if max_speakers is not None:
                 kw["max_speakers"] = max_speakers
 
-            try:
+            try:  # pragma: no cover - real pyannote inference, GPU-bound
                 diarization = self._pipeline(str(wav_path), **kw)
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover
                 raise TranscriptionError(f"diarization failed: {exc}") from exc
 
             turns: list[SpeakerTurn] = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
+            for turn, _, speaker in diarization.itertracks(yield_label=True):  # pragma: no cover
                 turns.append(
                     SpeakerTurn(
                         start=float(turn.start),
@@ -268,7 +270,7 @@ class DiarizationPipeline:
             turns.sort(key=lambda t: t.start)
             return turns
 
-    def unload(self) -> None:
+    def unload(self) -> None:  # pragma: no cover - exercises real pyannote internals
         with self._lock:
             if self._pipeline is not None:
                 # pyannote's SpeakerDiarization pipeline keeps strong refs to
@@ -287,7 +289,7 @@ class DiarizationPipeline:
                         for inner in ("model", "model_"):
                             if hasattr(sub, inner):
                                 setattr(sub, inner, None)
-                except Exception as exc:  # pragma: no cover
+                except Exception as exc:
                     log.debug("pyannote sub-model null-out skipped: %s", exc)
                 del self._pipeline
                 self._pipeline = None

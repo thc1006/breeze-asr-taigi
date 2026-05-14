@@ -351,6 +351,18 @@ class TestDiarizationPipelineErrorMapping:
         with pytest.raises(ModelLoadError, match="License acceptance required"):
             d.load()
 
+    def test_load_raises_when_no_hf_token(self, monkeypatch) -> None:
+        from taigi_asr.diarize import DiarizationPipeline
+        from taigi_asr.errors import ModelLoadError
+
+        # Strip both env vars so the constructor's resolution chain finds no token.
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+
+        d = DiarizationPipeline(hf_token=None)
+        with pytest.raises(ModelLoadError, match="HF_TOKEN env var required"):
+            d.load()
+
     def test_other_errors_use_generic_message(self, monkeypatch) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
