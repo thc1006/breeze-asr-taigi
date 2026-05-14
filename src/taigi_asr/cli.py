@@ -519,7 +519,13 @@ def main(argv: list[str] | None = None) -> int:
                             write_ok = True
                             try:
                                 _write_outputs(audio, segs, formats, single_out_path, meta)
-                            except OSError as werr:  # pragma: no cover
+                            except Exception as werr:  # pragma: no cover
+                                # Fallback is best-effort — any write failure
+                                # (OSError, UnicodeEncodeError, _render's
+                                # ValueError on unknown format, etc.) must
+                                # NOT abort the loop for subsequent files.
+                                # The user already lost diarize; we shouldn't
+                                # additionally lose ASR work for files N+1..M.
                                 write_ok = False
                                 print(
                                     f"ERROR [{audio.name}] write fallback: {werr}",
@@ -596,7 +602,11 @@ def main(argv: list[str] | None = None) -> int:
                             }
                             try:
                                 _write_outputs(audio, segs, formats, single_out_path, fb_meta)
-                            except OSError as werr:  # pragma: no cover
+                            except Exception as werr:  # pragma: no cover
+                                # Same rationale as the dia.load() fallback
+                                # write — broaden the catch so a unicode /
+                                # render / OS failure on file N doesn't kill
+                                # the diarize loop for files N+1..M.
                                 print(
                                     f"ERROR [{audio.name}] write fallback: {werr}",
                                     file=sys.stderr,
@@ -647,6 +657,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"xRT {agg_xrt:.1f} (excl. model load)",
                 file=sys.stderr,
             )
+            if ok_count == 0:
+                # All files counted as ``failed`` BUT success_duration > 0
+                # means the dia.{load,run}() fallback wrote un-attributed
+                # transcripts for them. Disambiguate so the user doesn't read
+                # "0/N OK + positive audio time" as a contradiction.
+                print(
+                    "  (--diarize did not take effect for any file; "
+                    "ASR transcripts were written as un-attributed fallback.)",
+                    file=sys.stderr,
+                )
         else:
             print(
                 f"\nBatch summary: {ok_count}/{len(inputs)} OK (no successful transcriptions)",

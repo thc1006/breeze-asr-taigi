@@ -366,6 +366,30 @@ class TestDiarizationPipelineErrorMapping:
         d = DiarizationPipeline(hf_token="dummy")
         assert d.is_loaded() is False
 
+    def test_load_raises_when_pipeline_from_pretrained_returns_none(self, monkeypatch) -> None:
+        """Some HF auth failure modes (notably partial license acceptance) make
+        ``Pipeline.from_pretrained`` return ``None`` rather than raise. The
+        ``if pipeline is None: raise ModelLoadError(...)`` branch in
+        ``DiarizationPipeline.load()`` exists for exactly this case; cover it
+        by mocking the upstream call."""
+        import sys
+
+        from taigi_asr.diarize import DiarizationPipeline
+        from taigi_asr.errors import ModelLoadError
+
+        class _FakePipelineModule:
+            class Pipeline:
+                @staticmethod
+                def from_pretrained(*a, **kw):
+                    return None
+
+        monkeypatch.setitem(sys.modules, "pyannote.audio", _FakePipelineModule)
+        d = DiarizationPipeline(hf_token="dummy_token")
+        with pytest.raises(ModelLoadError, match="Failed to load"):
+            d.load()
+        # Ensure the load() guard kept the pipeline unset on this failure path.
+        assert d.is_loaded() is False
+
     def test_load_raises_when_no_hf_token(self, monkeypatch) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError

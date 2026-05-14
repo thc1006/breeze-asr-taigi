@@ -188,9 +188,9 @@ class DiarizationPipeline:
                     "pyannote.audio not installed. Run: pip install 'pyannote.audio<4'"
                 ) from exc
 
-            try:  # pragma: no cover - real pyannote load, requires HF network + GPU
+            try:
                 with _torch_load_weights_only_false():
-                    pipeline = Pipeline.from_pretrained(
+                    pipeline = Pipeline.from_pretrained(  # pragma: no cover - real HF network + checkpoint load
                         self.PIPELINE_ID, use_auth_token=self.hf_token
                     )
                 if pipeline is None:
@@ -200,11 +200,15 @@ class DiarizationPipeline:
                         "pyannote/speaker-diarization-3.1 and "
                         "pyannote/segmentation-3.0 at https://hf.co/."
                     )
-                pipeline.to(torch.device(self.device))
-                self._pipeline = pipeline
-                self._loaded = True
-                log.info("pyannote diarization pipeline loaded on %s", self.device)
-            except ModelLoadError:  # pragma: no cover - re-raise from the pragma'd block above
+                pipeline.to(torch.device(self.device))  # pragma: no cover - real GPU device move
+                self._pipeline = (
+                    pipeline  # pragma: no cover - reached only after real pyannote load
+                )
+                self._loaded = True  # pragma: no cover
+                log.info(  # pragma: no cover
+                    "pyannote diarization pipeline loaded on %s", self.device
+                )
+            except ModelLoadError:
                 raise
             except Exception as exc:
                 msg = str(exc)
@@ -227,7 +231,7 @@ class DiarizationPipeline:
     def is_loaded(self) -> bool:
         return self._loaded
 
-    def run(  # pragma: no cover - real pyannote inference path, GPU-bound; mock-replaced wholesale in CLI tests via DiarizationPipeline substitution
+    def run(
         self,
         wav_path: str | Path,
         *,
@@ -255,11 +259,17 @@ class DiarizationPipeline:
 
             try:
                 diarization = self._pipeline(str(wav_path), **kw)
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - real pyannote GPU error
                 raise TranscriptionError(f"diarization failed: {exc}") from exc
 
             turns: list[SpeakerTurn] = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
+            for (
+                turn,
+                _,
+                speaker,
+            ) in diarization.itertracks(
+                yield_label=True
+            ):  # pragma: no cover - real pyannote diarization object iteration
                 turns.append(
                     SpeakerTurn(
                         start=float(turn.start),

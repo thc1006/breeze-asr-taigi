@@ -418,6 +418,12 @@ def test_diarize_run_failure_writes_unattributed_fallback(
     content = out_path.read_text(encoding="utf-8")
     assert "台語句子" in content
     assert "[SPEAKER_" not in content
+    # No RTTM should be written when dia.run() failed for this file — the
+    # RTTM write happens AFTER ``turns = dia.run(...)`` in the success
+    # branch, so a regression that mistakenly wrote a stale/empty RTTM
+    # would be caught here.
+    rttm_path = tmp_path / "clip.rttm"
+    assert not rttm_path.exists(), f"Stale RTTM written despite dia.run() failure: {rttm_path}"
 
 
 def test_has_any_speaker_flag_predicate() -> None:
