@@ -11,7 +11,6 @@ the most. Output formats: SRT, TXT, JSON (all with speaker labels).
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path

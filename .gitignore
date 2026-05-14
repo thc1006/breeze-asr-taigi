@@ -129,7 +129,4 @@ test_mp3_transcript.*
 tmp/
 temp/
 *.tmp
-*.json
 music/*
-*.mp3codecov/patch
-codecov/patch — 19.40% of diff hit (target 59.48%)

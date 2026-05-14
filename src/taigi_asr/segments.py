@@ -23,7 +23,7 @@ class TimestampedSegment:
     text: str
     speaker: str | None = None
 
-    def with_speaker(self, speaker: str) -> "TimestampedSegment":
+    def with_speaker(self, speaker: str) -> TimestampedSegment:
         """Return a copy with ``speaker`` set; immutability preserved."""
         return TimestampedSegment(
             start_time=self.start_time,

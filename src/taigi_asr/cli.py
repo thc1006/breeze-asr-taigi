@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from taigi_asr import __version__
 from taigi_asr.audio import AudioConverter
@@ -19,6 +20,11 @@ from taigi_asr.engines import build_engine
 from taigi_asr.errors import InsufficientVRAMError, TaigiASRError
 from taigi_asr.formatters import to_json, to_srt, to_txt, to_vtt
 from taigi_asr.router import EngineKind, EngineRouter, GPUProfiler
+
+if TYPE_CHECKING:
+    # Pulled in only for the asr_results annotation; importing at runtime
+    # would force the segments module into the CLI's hot startup path.
+    from taigi_asr.segments import TimestampedSegment
 
 
 def _parse_engine(raw: str) -> EngineKind | None:
@@ -441,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         # then diarize. Necessary on 4 GB cards where ASR (~2.9 GB peak) and
         # pyannote (~700-900 MB) can't co-reside.
         asr_results: list[
-            tuple[Path, list["TimestampedSegment"], Path, float, float]
+            tuple[Path, list[TimestampedSegment], Path, float, float]
         ] = []
         # Tracked separately from asr_results so the cleanup loop runs even
         # when the diarize stage clears asr_results on load failure.
@@ -506,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
                             "usable.",
                             file=sys.stderr,
                         )
-                        for audio, segs, wav_path, duration, asr_elapsed in asr_results:
+                        for audio, segs, _wav_path, duration, _asr_elapsed in asr_results:
                             meta = {
                                 **meta_base,
                                 "duration_sec": round(duration, 2),

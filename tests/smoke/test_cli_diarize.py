@@ -123,7 +123,7 @@ def test_diarize_load_failure_falls_back_to_unattributed_asr(
     import taigi_asr.cli as cli_mod
     import taigi_asr.diarize as dia_mod
     import taigi_asr.engines.fake as fake_mod
-    from taigi_asr.router import EngineKind, EngineSpec, GPUInfo
+    from taigi_asr.router import GPUInfo
 
     audio = tmp_path / "clip.wav"
     audio.write_bytes(b"\x00" * 32)
