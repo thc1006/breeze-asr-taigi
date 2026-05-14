@@ -174,6 +174,166 @@ def test_diarize_load_failure_falls_back_to_unattributed_asr(
     assert "[SPEAKER_" not in content
 
 
+class _SuccessfulDiarizationPipeline:
+    """Drop-in replacement whose ``run()`` returns canned ``SpeakerTurn``s so
+    we can exercise the full happy-path of the CLI's Phase 2 (attribute,
+    write SRT, write companion RTTM) without pyannote / CUDA."""
+
+    PIPELINE_ID = "pyannote/speaker-diarization-3.1"
+
+    def __init__(self, *a, **kw) -> None:  # noqa: ARG002
+        self._loaded = False
+
+    def load(self) -> None:
+        self._loaded = True
+
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def run(self, *a, **kw):  # noqa: ARG002
+        from taigi_asr.diarize import SpeakerTurn
+
+        # Two turns spanning the FakeEngine's single 0-1s segment so the
+        # attribute_speakers overlap math picks SPEAKER_00 deterministically.
+        return [
+            SpeakerTurn(start=0.0, end=0.8, speaker="SPEAKER_00"),
+            SpeakerTurn(start=0.8, end=1.0, speaker="SPEAKER_01"),
+        ]
+
+    def unload(self) -> None:
+        self._loaded = False
+
+
+def test_diarize_happy_path_writes_attributed_srt_and_rttm(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """End-to-end happy path: --diarize on a single file writes a SPEAKER-
+    prefixed SRT plus a companion .rttm. This is the main coverage hook for
+    the Phase 2 success body — without it, CLI coverage drops well below the
+    project's codecov threshold."""
+    import taigi_asr.cli as cli_mod
+    import taigi_asr.diarize as dia_mod
+    import taigi_asr.engines.fake as fake_mod
+    from taigi_asr.router import GPUInfo
+
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"\x00" * 32)
+    fake_wav = tmp_path / "_fake_16k.wav"
+    fake_wav.write_bytes(b"\x00" * 32)
+
+    monkeypatch.setattr(
+        cli_mod.AudioConverter,
+        "convert",
+        staticmethod(lambda src, out_dir=None: (fake_wav, 1.0)),
+    )
+    monkeypatch.setattr(cli_mod.AudioConverter, "cleanup", staticmethod(lambda p: None))
+    monkeypatch.setattr(
+        cli_mod.GPUProfiler,
+        "detect",
+        staticmethod(
+            lambda: GPUInfo(name="FakeGPU", vram_gb=4.0, cuda_available=True, bf16_supported=False)
+        ),
+    )
+    fake_engine = fake_mod.FakeEngine(
+        script=[TimestampedSegment(start_time=0.0, end_time=1.0, text="台語句子")]
+    )
+    monkeypatch.setattr(cli_mod, "build_engine", lambda spec: fake_engine)
+    monkeypatch.setattr(dia_mod, "DiarizationPipeline", _SuccessfulDiarizationPipeline)
+
+    rc = cli_mod.main([str(audio), "--diarize", "--engine", "fw", "--format", "srt"])
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    # SRT must have the SPEAKER prefix from attribute_speakers.
+    srt_path = tmp_path / "clip.srt"
+    assert srt_path.exists()
+    srt_body = srt_path.read_text(encoding="utf-8")
+    assert "[SPEAKER_00]" in srt_body
+    assert "台語句子" in srt_body
+    # Companion RTTM next to the audio.
+    rttm_path = tmp_path / "clip.rttm"
+    assert rttm_path.exists()
+    rttm_body = rttm_path.read_text(encoding="utf-8")
+    assert rttm_body.startswith("SPEAKER clip 1 ")
+    assert "SPEAKER_00" in rttm_body and "SPEAKER_01" in rttm_body
+
+
+class _RunFailingDiarizationPipeline:
+    """``load()`` succeeds but ``run()`` raises ``TranscriptionError`` — the
+    exact shape of a real-world dia.run() per-file failure (VRAM OOM mid-batch,
+    pyannote model edge case, short clip, etc.)."""
+
+    PIPELINE_ID = "pyannote/speaker-diarization-3.1"
+
+    def __init__(self, *a, **kw) -> None:  # noqa: ARG002
+        self._loaded = False
+
+    def load(self) -> None:
+        self._loaded = True
+
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def run(self, *a, **kw):  # noqa: ARG002
+        from taigi_asr.errors import TranscriptionError
+
+        raise TranscriptionError("simulated dia.run failure for test")
+
+    def unload(self) -> None:
+        self._loaded = False
+
+
+def test_diarize_run_failure_writes_unattributed_fallback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """When dia.load() succeeds but dia.run() fails for a specific file, the
+    CLI must write the un-attributed ASR transcript for THAT file so its ASR
+    work isn't lost — symmetric with the dia.load() failure fallback."""
+    import taigi_asr.cli as cli_mod
+    import taigi_asr.diarize as dia_mod
+    import taigi_asr.engines.fake as fake_mod
+    from taigi_asr.router import GPUInfo
+
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"\x00" * 32)
+    fake_wav = tmp_path / "_fake_16k.wav"
+    fake_wav.write_bytes(b"\x00" * 32)
+
+    monkeypatch.setattr(
+        cli_mod.AudioConverter,
+        "convert",
+        staticmethod(lambda src, out_dir=None: (fake_wav, 1.0)),
+    )
+    monkeypatch.setattr(cli_mod.AudioConverter, "cleanup", staticmethod(lambda p: None))
+    monkeypatch.setattr(
+        cli_mod.GPUProfiler,
+        "detect",
+        staticmethod(
+            lambda: GPUInfo(name="FakeGPU", vram_gb=4.0, cuda_available=True, bf16_supported=False)
+        ),
+    )
+    fake_engine = fake_mod.FakeEngine(
+        script=[TimestampedSegment(start_time=0.0, end_time=1.0, text="台語句子")]
+    )
+    monkeypatch.setattr(cli_mod, "build_engine", lambda spec: fake_engine)
+    monkeypatch.setattr(dia_mod, "DiarizationPipeline", _RunFailingDiarizationPipeline)
+
+    out_path = tmp_path / "clip.srt"
+    rc = cli_mod.main([str(audio), "--diarize", "--engine", "fw", "--format", "srt"])
+    captured = capsys.readouterr()
+
+    # Exit code 4 because the only file failed; per-file dia.run failure with
+    # an N=1 batch makes failed == inputs.
+    assert rc == 4, captured.err
+    assert "diarize: simulated" in captured.err
+    assert "un-attributed ASR fallback" in captured.err
+    # The un-attributed SRT must still be on disk — this is the fix.
+    assert out_path.exists(), captured.err
+    content = out_path.read_text(encoding="utf-8")
+    assert "台語句子" in content
+    assert "[SPEAKER_" not in content
+
+
 def test_has_any_speaker_flag_predicate() -> None:
     """The warning-without-diarize branch is gated by ``_has_any_speaker_flag``;
     exercise that predicate directly so the test doesn't need to run main()

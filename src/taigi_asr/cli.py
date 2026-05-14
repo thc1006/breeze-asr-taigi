@@ -509,21 +509,32 @@ def main(argv: list[str] | None = None) -> int:
                             "usable.",
                             file=sys.stderr,
                         )
-                        for audio, segs, _wav_path, duration, _asr_elapsed in asr_results:
+                        for audio, segs, _wav_path, duration, asr_elapsed in asr_results:
                             meta = {
                                 **meta_base,
                                 "duration_sec": round(duration, 2),
                                 "diarized": False,
                                 "diarize_error": str(exc),
                             }
+                            write_ok = True
                             try:
                                 _write_outputs(audio, segs, formats, single_out_path, meta)
                             except OSError as werr:  # pragma: no cover
+                                write_ok = False
                                 print(
                                     f"ERROR [{audio.name}] write fallback: {werr}",
                                     file=sys.stderr,
                                 )
                             failed.append(audio)
+                            # Credit the ASR cost even though we exit non-zero —
+                            # the un-attributed transcript IS on disk and the
+                            # GPU time was real work. Without this credit the
+                            # Batch summary at end-of-run would print "no
+                            # successful transcriptions" while N files sit on
+                            # disk, contradicting itself.
+                            if write_ok:
+                                success_duration += duration
+                                success_elapsed += asr_elapsed
                         asr_results = []
                     for audio, segs, wav_path, duration, asr_elapsed in asr_results:
                         try:
@@ -543,7 +554,15 @@ def main(argv: list[str] | None = None) -> int:
                             # downstream tooling (merger, NIST tools) finds it
                             # next to the transcript.
                             rttm_path = audio.with_suffix(".rttm")
-                            uri = "_".join(audio.stem.split())
+                            # ``or "audio"`` mirrors scripts/diarize_compare.py:_sanitize_uri.
+                            # Without the fallback, a pathological stem like
+                            # ``"  "`` (e.g. file named ``"  .m4a"``) collapses
+                            # to empty string after split-join, then
+                            # ``turns_to_rttm`` raises ``ValueError`` — which is
+                            # NOT ``TaigiASRError`` and would escape the per-file
+                            # ``except`` below, aborting Phase 2 after pyannote
+                            # already consumed GPU time for this file.
+                            uri = "_".join(audio.stem.split()) or "audio"
                             rttm_path.write_text(turns_to_rttm(turns, uri), encoding="utf-8")
                             print(f"[OK] Saved: {rttm_path}", file=sys.stderr)
                             total_elapsed = asr_elapsed + dia_elapsed
@@ -558,10 +577,30 @@ def main(argv: list[str] | None = None) -> int:
                                     file=sys.stderr,
                                 )
                         except TaigiASRError as exc:
+                            # Symmetric with the dia.load() failure branch
+                            # above: write the un-attributed ASR transcript so
+                            # the user doesn't lose the GPU time already spent
+                            # transcribing this file. CLI still exits non-zero
+                            # via failed[] so callers can detect the partial
+                            # outcome.
                             print(
-                                f"ERROR [{audio.name}] diarize: {exc}",
+                                f"ERROR [{audio.name}] diarize: {exc}\n"
+                                "  -> writing un-attributed ASR fallback for this file.",
                                 file=sys.stderr,
                             )
+                            fb_meta = {
+                                **meta_base,
+                                "duration_sec": round(duration, 2),
+                                "diarized": False,
+                                "diarize_error": str(exc),
+                            }
+                            try:
+                                _write_outputs(audio, segs, formats, single_out_path, fb_meta)
+                            except OSError as werr:  # pragma: no cover
+                                print(
+                                    f"ERROR [{audio.name}] write fallback: {werr}",
+                                    file=sys.stderr,
+                                )
                             failed.append(audio)
                 finally:
                     try:
