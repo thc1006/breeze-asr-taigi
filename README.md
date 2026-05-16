@@ -16,6 +16,7 @@
 - **廣泛格式**：`m4a / mp3 / wav / mp4 / mov / mkv / flac / ogg / webm` 全部透過 ffmpeg。
 - **完整測試**：unit + smoke + integration（pytest），GitHub Actions CI Linux/Windows 多版本。
 - **Docker + WSL2 支援**：CUDA 12.1 runtime + GPU passthrough + 模型 cache volume。
+- **講者分群 (`--diarize`, 選用)**：序列載入 pyannote/speaker-diarization-3.1，4 GB VRAM 上 ASR 與 diarize 不共存。輸出帶 `[SPEAKER_xx]` 標籤的 SRT/TXT/VTT/JSON + 標準 RTTM。
 
 ## 模型來源（固定，不替代）
 
@@ -82,6 +83,10 @@ CLI 選項：
 | `--beam-size` | 5 | beam search 寬度（4GB GPU 建議 5-10）|
 | `--best-of` | 5 | 溫度採樣候選數 |
 | `--word-timestamps` | False | 逐字時間戳記（較慢）|
+| `--diarize` | False | 接上 pyannote 講者分群（見下方專節，需 HF_TOKEN + license）|
+| `--num-speakers` | — | 指定講者數（與 `--min/--max-speakers` 互斥）|
+| `--min-speakers` | — | 講者數下限（搭配 `--diarize`）|
+| `--max-speakers` | — | 講者數上限（搭配 `--diarize`）|
 | `-v` / `-vv` | WARN | 增加 log 詳細度 |
 
 `--input-dir` 自動撈的副檔名：`.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.webm`, `.mp4`, `.mkv`, `.aac`, `.opus`, `.wma`。其他格式（如 `.aiff`）只要 ffmpeg 認得，仍可走 positional 直接傳。
@@ -168,14 +173,98 @@ segments = engine.transcribe("audio.m4a")
 
 ---
 
+## 講者分群 / Speaker Diarization
+
+`--diarize` 在 ASR 之後再跑一遍 [`pyannote/speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1)，把每段 ASR 文字附上 `SPEAKER_NN` 標籤。整個 pipeline 是 **序列載入**：ASR 跑完 → `engine.unload()` 釋放 VRAM → pyannote 載入 → diarize → 對齊文字。這樣 4 GB 卡也能跑完整 stack，不會兩個模型一起擠 GPU 而 OOM。
+
+> **UI 範圍**：本功能目前 **僅 CLI 提供**。Gradio Web UI（`start.bat` / `start.sh`）尚未接上 `--diarize`，從 UI 啟動的轉錄沒有 speaker 標籤。需要 diarize 的場景請走 CLI 或 `scripts/` 下的 standalone 工具。
+
+### 一次性設定（HuggingFace token + license）
+
+1. 在 [HuggingFace tokens](https://huggingface.co/settings/tokens) 建一個 read token，設環境變數 `HF_TOKEN`（或 `HUGGINGFACE_HUB_TOKEN`）。
+2. 用同一個 HF 帳號開瀏覽器，在以下兩頁各按一次 **Agree and access repository**：
+   - <https://huggingface.co/pyannote/speaker-diarization-3.1>
+   - <https://huggingface.co/pyannote/segmentation-3.0>
+
+漏掉任一步，CLI 會在 `dia.load()` 時印 `HF_TOKEN env var required ...` 或 `Failed to load pyannote/speaker-diarization-3.1: ...` 並回 exit code 4，但已轉錄好的 ASR 文字仍會以無 speaker 標籤的形式寫出，不會白費 GPU 時間。
+
+### 兩條常用路線
+
+| 場景 | 指令 | 100min 預估 wall | 輸出 |
+|---|---|---|---|
+| **快路**（純文字，趕時間） | `taigi-asr <audio> --format txt` | ~10–12 min | `<audio>.txt`（`[時間] 內容`，無 speaker） |
+| **完整 E2E**（含 diarize） | `taigi-asr <audio> --diarize --format srt,txt,json` | ~15–18 min | `.srt` / `.txt` / `.json`（每段前置 `[SPEAKER_xx]`）+ `.rttm` |
+
+> **標點**：Breeze-ASR-26 對台語/中文輸出以空格分隔短語、**很少帶 ，。？！**。若要還原句末標點，需另外接 punctuation-restoration 模型（不在本專案範圍）。
+
+### 講者數約束
+
+| Flag | 用途 | 適用情境 |
+|---|---|---|
+| 預設（不加 flag） | pyannote 自動估計 | 不確定講者數 / 內容混雜，可能輕度過分群 |
+| `--num-speakers N` | 強制 N 位 | 明確知道有幾人（訪談 1+1、會議名單） |
+| `--min-speakers M --max-speakers N` | 範圍 | 知道大致範圍但不固定 |
+
+**經驗法則（100min 演講錄音實測，1 主講 + 1 主持 + 零星觀眾發問）**：
+
+| 變體 | 設定 | 結果 | 評價 |
+|---|---|---|---|
+| auto | 不加 flag | 5 講者，主講 74%、4 個 <30s 雜訊群 | 輕度過分群 |
+| binary | `--num-speakers 2` | 2 講者，99.9% vs 0.1%（主持人被併入主講） | **不建議** |
+| ternary | `--num-speakers 3` | 3 講者，74% / 0.7% / 0.1%（主講 / 主持 / 雜音） | **最貼近 ground truth** |
+
+少數人對談（1 主 + 1 客）一般 `--num-speakers 2` 直接給即可；4 人以上互動，先試 auto 再依需要收斂。
+
+### 端點 4 GB GPU 觀測值
+
+90 秒 clip 的實測 GPU 使用率（`nvidia-smi -l 2`）：
+
+| 階段 | GPU% | VRAM |
+|---|---|---|
+| ASR 推論高峰 | 100% | 3.0 GB |
+| ASR unload 後 | — | 0.5 GB |
+| Diarize embedding 高峰 | 99% | 2.4 GB |
+
+100 min 音檔 E2E 約 15–18 分鐘完成（ASR ~10 min + diarize ~5 min + 載入/切換 ~1 min），peak VRAM 從未超過 3.1 GB。
+
+### 獨立工具
+
+只想 diarize（不重跑 ASR）、或想比較不同講者數約束：
+
+```bash
+# 把 ASR 跑出來的 SRT + 既有 RTTM 合併為帶 speaker 標籤的字幕
+# 輸出：<audio>.diarized.srt / .txt / .json（與輸入同目錄；可用 --out-prefix 改）
+python scripts/merge_diarize.py audio.srt audio.rttm
+
+# 同一個音檔，比較 binary vs ternary 兩種約束（模型只 load 一次）
+# 輸出：<audio>.binary.rttm / .ternary.rttm + .speakers.txt（與音檔同目錄）
+python scripts/diarize_compare.py audio.m4a
+```
+
+### Diarize 退出碼
+
+| 代碼 | 含義 |
+|---|---|
+| `0` | 全部成功（含 speaker 標籤） |
+| `4` | 單檔或整批檔案都失敗（含 `dia.load()` token/license/網路錯，或所有檔案 diarize 都掛）。ASR 文字仍以無 speaker 形式寫出 |
+| `7` | 多檔批次中部分檔案 diarize 失敗（其他成功） |
+
+### 邊角情況
+
+- **沒有 CUDA / CPU 環境**：`DiarizationPipeline` 目前固定 `device="cuda"`，CPU-only 環境會在 load 時拋出 CUDA error 並進入上方 exit 4 fallback；ASR 仍可以 CPU 跑（`--engine fw` 自動降級為 `int8` batch=1）。
+- **多檔批次 + `--diarize`**：CLI 採 **兩 pass 編排** — Phase 1 把所有檔案 ASR 完，unload FW 釋放 VRAM；Phase 2 載入 pyannote、逐檔 diarize + 對齊。各檔的轉錄會緩存在記憶體直到 Phase 2 寫出（單檔 ~60 KB；100 檔 ~6 MB 可接受）。
+
+---
+
 ## 專案結構
 
 ```
 src/taigi_asr/
-  segments.py         # TimestampedSegment dataclass
+  segments.py         # TimestampedSegment dataclass (含 optional speaker)
   formatters.py       # to_txt / to_srt / to_vtt / to_json
   audio.py            # AudioConverter (16 kHz mono)
   router.py           # GPUProfiler + EngineRouter
+  diarize.py          # DiarizationPipeline + attribute_speakers + RTTM I/O
   engines/
     base.py           # ASREngine Protocol
     faster_whisper.py # FasterWhisperEngine (CT2)
@@ -184,7 +273,11 @@ src/taigi_asr/
   ui/
     gradio_app.py     # Gradio Blocks
     launcher.py       # python -m taigi_asr.ui.launcher
-  cli.py              # python -m taigi_asr.cli
+  cli.py              # python -m taigi_asr.cli（含 --diarize 兩 pass 編排）
+scripts/
+  merge_diarize.py    # SRT + RTTM → 帶 speaker 標籤的 SRT/TXT/JSON
+  diarize_compare.py  # 一次跑 binary/ternary 兩種 speaker constraints
+  diarize_poc.py      # 單次 diarize 試跑（auto-detect 講者數）
 tests/
   unit/               # unit tests (CPU-only, <3s)
   smoke/              # CLI + UI smoke tests
@@ -201,6 +294,14 @@ pytest tests/unit tests/smoke       # 快速
 pytest -m slow                       # integration (需 GPU + 模型)
 ruff check . && ruff format --check .
 pre-commit install
+```
+
+如需開啟 `--diarize` 開發：
+
+```bash
+pip install -e ".[diarize]"          # pyannote.audio v3 系列（相容 torch 2.6 CUDA）
+export HF_TOKEN=hf_xxx               # 接受 license（見「講者分群」節）
+python -m taigi_asr.cli sample.m4a --diarize --format srt,txt,json
 ```
 
 ---
