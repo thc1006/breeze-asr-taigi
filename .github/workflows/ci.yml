@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -59,7 +59,7 @@ jobs:
           - { os: ubuntu-latest, python-version: '3.12' }
           - { os: windows-latest, python-version: '3.11' }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install ffmpeg (cross-platform, cached)
         uses: FedericoCarboni/setup-ffmpeg@v3
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
           fail_ci_if_error: false
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Skip the ~8 min image build on PRs that don't touch any of the inputs
       # to the Dockerfile (i.e. PRs that only change CI yaml, docs, or tests).
