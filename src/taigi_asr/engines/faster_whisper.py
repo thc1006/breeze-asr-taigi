@@ -31,6 +31,57 @@ from taigi_asr.segments import TimestampedSegment
 
 log = logging.getLogger(__name__)
 
+# Word-grouping thresholds, used only when ``word_timestamps=True``.
+# faster-whisper's own segments run 25 s+ on meeting audio — long enough to
+# span several speakers, which makes downstream diarization label the whole
+# line as whoever happened to talk most. Splitting on natural pauses (and
+# capping the span) keeps each line inside a single speaker's turn.
+WORD_SPLIT_GAP_S = 0.4
+WORD_SPLIT_MAX_S = 8.0
+
+
+def _group_words(words, max_gap: float, max_span: float) -> list[TimestampedSegment]:
+    """Collapse per-word timings into short, speaker-alignable lines."""
+    lines: list[TimestampedSegment] = []
+    buf: list = []
+
+    def emit(chunk: list) -> None:
+        text = "".join(w.word for w in chunk).strip()
+        if text:
+            lines.append(TimestampedSegment(float(chunk[0].start), float(chunk[-1].end), text))
+
+    def split_overlong() -> None:
+        """Cut at the widest internal pause instead of mid-phrase at the cap.
+
+        Hard-cutting the moment the span limit is hit lands in the middle of a
+        word ("今天的會" / "議內容"), which reads badly in the SRT. The widest
+        pause inside the buffer is the least-bad boundary available.
+        """
+        nonlocal buf
+        if len(buf) < 2:
+            emit(buf)
+            buf = []
+            return
+        _, idx = max(
+            (float(b.start) - float(a.end), i)
+            for i, (a, b) in enumerate(zip(buf, buf[1:], strict=False))
+        )
+        emit(buf[: idx + 1])
+        buf = buf[idx + 1 :]
+
+    for w in words:
+        if w.start is None or w.end is None:
+            continue
+        if buf and float(w.start) - float(buf[-1].end) >= max_gap:
+            emit(buf)
+            buf = []
+        buf.append(w)
+        while buf and float(buf[-1].end) - float(buf[0].start) >= max_span:
+            split_overlong()
+    if buf:
+        emit(buf)
+    return lines
+
 
 class FasterWhisperEngine:
     """Wraps faster-whisper's :class:`BatchedInferencePipeline`."""
@@ -191,6 +242,15 @@ class FasterWhisperEngine:
                 text = (seg.text or "").strip()
                 if not text:
                     continue
+                # With word_timestamps the model has already computed per-word
+                # timings; use them instead of throwing them away and emitting
+                # one 25-second line.
+                words = getattr(seg, "words", None) if word_timestamps else None
+                if words:
+                    grouped = _group_words(words, WORD_SPLIT_GAP_S, WORD_SPLIT_MAX_S)
+                    if grouped:
+                        out.extend(grouped)
+                        continue
                 start = float(seg.start) if seg.start is not None else 0.0
                 end = float(seg.end) if seg.end is not None else start + 1.0
                 out.append(TimestampedSegment(start_time=start, end_time=end, text=text))
