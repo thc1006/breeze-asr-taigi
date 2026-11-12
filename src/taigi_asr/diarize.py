@@ -271,7 +271,10 @@ class DiarizationPipeline:
         with self._lock:
             if self._loaded:
                 return
-            if not self.hf_token and not _hf_offline():
+            # A local pipeline directory / config needs no token; neither do
+            # cached models in offline mode.
+            local = Path(self.PIPELINE_ID).exists()
+            if not self.hf_token and not _hf_offline() and not local:
                 raise ModelLoadError(
                     f"HF_TOKEN env var required for pyannote diarization ({self.PIPELINE_ID}). "
                     "Create a read token at https://hf.co/settings/tokens and set HF_TOKEN "

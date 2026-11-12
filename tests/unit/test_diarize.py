@@ -650,6 +650,21 @@ class TestDiarizationPipelineErrorMapping:
         with pytest.raises(ModelLoadError, match="HF_TOKEN env var required"):
             d.load()
 
+    def test_local_pipeline_path_loads_without_token(
+        self, fake_pyannote, monkeypatch, tmp_path
+    ) -> None:
+        import huggingface_hub
+
+        from taigi_asr.diarize import DiarizationPipeline
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(huggingface_hub, "get_token", lambda: None)
+        config = tmp_path / "config.yaml"
+        config.write_text("pipeline: {}\n", encoding="utf-8")
+        DiarizationPipeline(device="cpu", pipeline_id=str(config)).load()
+        assert fake_pyannote["calls"] == [((str(config),), {"token": None})]
+
     def test_other_errors_use_generic_message(self, fake_pyannote) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
