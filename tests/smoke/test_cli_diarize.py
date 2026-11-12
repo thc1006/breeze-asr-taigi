@@ -444,3 +444,21 @@ def test_has_any_speaker_flag_predicate() -> None:
     ]:
         args = parser.parse_args(["fake.wav", flag, value])
         assert _has_any_speaker_flag(args) is True, flag
+
+
+def test_speaker_counts_must_be_positive_integers(capsys) -> None:
+    """``--num-speakers 0`` / negatives / non-ints are rejected by argparse
+    (exit 2) before any audio, GPU or model work."""
+    import pytest
+
+    import taigi_asr.cli as cli_mod
+
+    for flag, value in [
+        ("--num-speakers", "0"),
+        ("--min-speakers", "-1"),
+        ("--max-speakers", "two"),
+    ]:
+        with pytest.raises(SystemExit) as exc_info:
+            cli_mod.main(["x.wav", "--diarize", flag, value])
+        assert exc_info.value.code == 2
+        assert "expected a positive integer" in capsys.readouterr().err

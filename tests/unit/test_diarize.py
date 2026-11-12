@@ -1,8 +1,9 @@
 """Tests for taigi_asr.diarize (the pure-Python parts — no pyannote needed).
 
 Covers attribute_speakers overlap math, RTTM round-trip, and TimestampedSegment
-speaker-rendering. The DiarizationPipeline class itself requires HF auth + GPU
-and is exercised by ``scripts/diarize_poc.py`` and the integration smoke test.
+speaker-rendering. The DiarizationPipeline class is exercised through fakes for
+pyannote / huggingface_hub; real HF auth + GPU runs go through
+``scripts/diarize_poc.py``.
 """
 
 from __future__ import annotations
@@ -238,53 +239,148 @@ class TestSegmentSpeakerRendering:
         assert s.to_json_dict() == {"start": 0.0, "end": 1.0, "text": "hi"}
 
 
-class TestTorchLoadPatch:
-    """`_torch_load_weights_only_false` must force ``weights_only=False`` for
-    the duration of the context and restore the original on exit — including
-    on exception. The patch is what makes pyannote 3.4's Lightning checkpoint
-    load under PyTorch 2.6; an unrestored leak would silently degrade safety
-    elsewhere in the process (the safer default exists for a reason)."""
+class TestPyannoteVersionGate:
+    """3.x must fail with an upgrade hint, not a deep TypeError/AttributeError."""
 
-    def test_patch_forces_weights_only_false_and_restores(self) -> None:
+    def _fake_version(self, monkeypatch, versions: dict[str, str]) -> None:
+        import importlib.metadata as md
+
+        real = md.version
+
+        def fake(name: str) -> str:
+            if name in versions:
+                return versions[name]
+            if name == "pyannote.audio":
+                raise md.PackageNotFoundError(name)
+            return real(name)
+
+        monkeypatch.setattr(md, "version", fake)
+
+    def test_rejects_pyannote_3(self, monkeypatch) -> None:
+        from taigi_asr.diarize import _check_pyannote_version
+        from taigi_asr.errors import ModelLoadError
+
+        self._fake_version(monkeypatch, {"pyannote.audio": "3.4.0"})
+        with pytest.raises(ModelLoadError, match=r"3\.4\.0 is too old.*>=4\.0\.3"):
+            _check_pyannote_version()
+
+    def test_reports_missing_pyannote(self, monkeypatch) -> None:
+        from taigi_asr.diarize import _check_pyannote_version
+        from taigi_asr.errors import ModelLoadError
+
+        self._fake_version(monkeypatch, {})
+        with pytest.raises(ModelLoadError, match="not installed"):
+            _check_pyannote_version()
+
+    def test_accepts_pyannote_4(self, monkeypatch) -> None:
+        from taigi_asr.diarize import _check_pyannote_version
+
+        self._fake_version(monkeypatch, {"pyannote.audio": "4.0.7"})
+        _check_pyannote_version()  # no exception
+
+
+class TestPipelineAndTokenResolution:
+    def test_pipeline_id_precedence(self, monkeypatch) -> None:
+        from taigi_asr.diarize import DEFAULT_PIPELINE_ID, PIPELINE_ENV_VAR, resolve_pipeline_id
+
+        monkeypatch.delenv(PIPELINE_ENV_VAR, raising=False)
+        assert (
+            resolve_pipeline_id()
+            == DEFAULT_PIPELINE_ID
+            == ("pyannote/speaker-diarization-community-1")
+        )
+        monkeypatch.setenv(PIPELINE_ENV_VAR, " pyannote/speaker-diarization-3.1 ")
+        assert resolve_pipeline_id() == "pyannote/speaker-diarization-3.1"
+        assert resolve_pipeline_id("org/custom") == "org/custom"
+
+    def test_instance_exposes_resolved_pipeline_id(self, monkeypatch) -> None:
+        from taigi_asr.diarize import PIPELINE_ENV_VAR, DiarizationPipeline
+
+        monkeypatch.setenv(PIPELINE_ENV_VAR, "pyannote/speaker-diarization-3.1")
+        assert DiarizationPipeline(device="cpu", hf_token="t").PIPELINE_ID == (
+            "pyannote/speaker-diarization-3.1"
+        )
+
+    def test_gated_repos(self) -> None:
+        from taigi_asr.diarize import gated_repos
+
+        assert gated_repos("pyannote/speaker-diarization-3.1") == (
+            "pyannote/speaker-diarization-3.1",
+            "pyannote/segmentation-3.0",
+        )
+        assert gated_repos("pyannote/speaker-diarization-community-1") == (
+            "pyannote/speaker-diarization-community-1",
+        )
+
+    def test_token_precedence(self, monkeypatch) -> None:
+        import huggingface_hub
+
+        from taigi_asr.diarize import _resolve_hf_token
+
+        monkeypatch.setattr(huggingface_hub, "get_token", lambda: "stored")
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+        assert _resolve_hf_token(None) == "stored"  # `hf auth login`
+        monkeypatch.setenv("HUGGINGFACE_HUB_TOKEN", "legacy")
+        assert _resolve_hf_token(None) == "legacy"
+        monkeypatch.setenv("HF_TOKEN", "env")
+        assert _resolve_hf_token(None) == "env"
+        assert _resolve_hf_token("explicit") == "explicit"
+
+    def test_device_defaults_to_cpu_without_cuda(self, monkeypatch) -> None:
         import torch
 
-        from taigi_asr.diarize import _torch_load_weights_only_false
+        from taigi_asr.diarize import DiarizationPipeline
 
-        # Install a spy as the "real" torch.load BEFORE entering the context so
-        # the patched wrapper captures it as ``original`` and we can verify the
-        # weights_only override actually reaches the underlying load call.
-        original_real = torch.load
-        captured: list[dict] = []
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert DiarizationPipeline(hf_token="t").device == "cpu"
+        assert DiarizationPipeline(device="cuda", hf_token="t").device == "cuda"
 
-        def spy(*args, **kwargs):
-            captured.append(dict(kwargs))
-            return "loaded"
 
-        torch.load = spy  # type: ignore[assignment]
-        try:
-            with _torch_load_weights_only_false():
-                # Inside context, torch.load is the patched wrapper around spy.
-                assert torch.load is not spy
-                # Caller asks for weights_only=True; the wrapper must overrule it.
-                torch.load("any", weights_only=True)
-            # On exit, our spy must be restored (not original_real — the context
-            # captures whatever was current at __enter__).
-            assert torch.load is spy
-        finally:
-            torch.load = original_real  # type: ignore[assignment]
+class TestWaveformAndOutput:
+    def test_load_waveform_reads_and_downmixes(self, tmp_path) -> None:
+        np = pytest.importorskip("numpy")
+        sf = pytest.importorskip("soundfile")
 
-        assert captured == [{"weights_only": False}]
+        from taigi_asr.diarize import _load_waveform
 
-    def test_patch_restores_on_exception(self) -> None:
-        import torch
+        stereo = np.stack([np.full(1600, 0.2), np.full(1600, 0.4)], axis=1).astype(np.float32)
+        wav = tmp_path / "st.wav"
+        sf.write(wav, stereo, 16000)
+        audio = _load_waveform(wav)
+        assert audio["sample_rate"] == 16000
+        assert tuple(audio["waveform"].shape) == (1, 1600)
+        assert float(audio["waveform"][0, 0]) == pytest.approx(0.3, abs=1e-4)
 
-        from taigi_asr.diarize import _torch_load_weights_only_false
+    def test_load_waveform_maps_unreadable_file(self, tmp_path) -> None:
+        from taigi_asr.diarize import _load_waveform
+        from taigi_asr.errors import TranscriptionError
 
-        original = torch.load
-        with pytest.raises(RuntimeError, match="simulated"):
-            with _torch_load_weights_only_false():
-                raise RuntimeError("simulated pyannote load failure")
-        assert torch.load is original
+        bad = tmp_path / "bad.wav"
+        bad.write_bytes(b"not a wav")
+        with pytest.raises(TranscriptionError, match="cannot read audio"):
+            _load_waveform(bad)
+
+    def test_output_unwrapping_prefers_exclusive(self) -> None:
+        from taigi_asr.diarize import _annotation_from_output
+
+        class _EmptyAnnotation:
+            def __bool__(self) -> bool:  # pyannote's Annotation is falsy when empty
+                return False
+
+        exclusive, regular = _EmptyAnnotation(), object()
+
+        class _Out:
+            exclusive_speaker_diarization = exclusive
+            speaker_diarization = regular
+
+        class _OnlyRegular:
+            speaker_diarization = regular
+
+        bare = object()
+        assert _annotation_from_output(_Out()) is exclusive  # even when empty
+        assert _annotation_from_output(_OnlyRegular()) is regular
+        assert _annotation_from_output(bare) is bare
 
 
 class TestSpeechbrainWinPatch:
@@ -311,13 +407,18 @@ class TestSpeechbrainWinPatch:
         except ImportError:
             pytest.skip("speechbrain not installed in this environment")
 
+        import importlib.metadata as md
+
         from taigi_asr.diarize import _patch_speechbrain_lazy_module
 
         monkeypatch.setattr("sys.platform", "win32")
-        # Clear any pre-existing sentinel so we can test a fresh apply +
-        # second-call no-op.
-        if hasattr(sb_iu.LazyModule, "_taigi_patched"):
-            monkeypatch.delattr(sb_iu.LazyModule, "_taigi_patched", raising=False)
+        real_version = md.version
+        monkeypatch.setattr(
+            md, "version", lambda n: "1.0.3" if n == "speechbrain" else real_version(n)
+        )
+        # Restore the real method + sentinel after the test.
+        monkeypatch.setattr(sb_iu.LazyModule, "ensure_module", sb_iu.LazyModule.ensure_module)
+        monkeypatch.setattr(sb_iu.LazyModule, "_taigi_patched", False, raising=False)
 
         _patch_speechbrain_lazy_module()
         assert getattr(sb_iu.LazyModule, "_taigi_patched", False) is True
@@ -327,6 +428,57 @@ class TestSpeechbrainWinPatch:
         # object the same identity (not re-wrapped).
         _patch_speechbrain_lazy_module()
         assert sb_iu.LazyModule.ensure_module is first_method
+
+    def test_noop_when_speechbrain_already_fixed(self, monkeypatch) -> None:
+        import importlib.metadata as md
+
+        from taigi_asr.diarize import _patch_speechbrain_lazy_module
+
+        monkeypatch.setattr("sys.platform", "win32")
+        real_version = md.version
+        monkeypatch.setattr(
+            md, "version", lambda n: "1.1.2" if n == "speechbrain" else real_version(n)
+        )
+        # Would raise ImportError past the gate in envs without speechbrain;
+        # returning cleanly proves the version gate short-circuits first.
+        _patch_speechbrain_lazy_module()
+
+
+@pytest.fixture
+def fake_pyannote(monkeypatch):
+    """Install a fake ``pyannote.audio`` and skip the installed-version check.
+
+    Returns a dict that the fake ``Pipeline.from_pretrained`` records its
+    calls into; set ``behaviour`` to an exception to raise, or ``return_none``
+    to mimic HF auth failure modes where ``from_pretrained`` returns None.
+    """
+    import sys
+
+    import taigi_asr.diarize as dia_mod
+
+    state: dict = {"calls": [], "behaviour": None, "return_none": False, "moved_to": None}
+
+    class _Loaded:
+        def to(self, device):
+            state["moved_to"] = str(device)
+            return self
+
+    class _FakePipelineModule:
+        class Pipeline:
+            @staticmethod
+            def from_pretrained(*a, **kw):
+                state["calls"].append((a, kw))
+                if state["return_none"]:
+                    return None
+                b = state["behaviour"]
+                if isinstance(b, BaseException):
+                    raise b
+                return _Loaded() if b is None else b
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio", _FakePipelineModule)
+    monkeypatch.setattr(dia_mod, "_check_pyannote_version", lambda: None)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    return state
 
 
 class TestDiarizationPipelineErrorMapping:
@@ -341,26 +493,45 @@ class TestDiarizationPipelineErrorMapping:
             "403 Client Error: Forbidden",
         ],
     )
-    def test_gated_repo_error_gets_license_hint(self, monkeypatch, upstream_msg: str) -> None:
+    def test_gated_repo_error_gets_license_hint(self, fake_pyannote, upstream_msg: str) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
 
-        class _FakePipelineModule:
-            class Pipeline:
-                @staticmethod
-                def from_pretrained(*a, **kw):
-                    raise RuntimeError(upstream_msg)
-
-        # The import inside load() is ``from pyannote.audio import Pipeline``;
-        # injecting a fake module makes the targeted-error branch reachable
-        # without pyannote actually attempting any network/auth work.
-        monkeypatch.setitem(__import__("sys").modules, "pyannote.audio", _FakePipelineModule)
-
-        d = DiarizationPipeline(hf_token="hf_dummy_token")
-        with pytest.raises(ModelLoadError, match="License acceptance required"):
+        fake_pyannote["behaviour"] = RuntimeError(upstream_msg)
+        d = DiarizationPipeline(
+            device="cpu", hf_token="hf_dummy_token", pipeline_id="pyannote/speaker-diarization-3.1"
+        )
+        with pytest.raises(ModelLoadError, match="License acceptance required") as exc_info:
             d.load()
+        # 3.1 gates two repos; both pages must be named.
+        assert "huggingface.co/pyannote/segmentation-3.0" in str(exc_info.value)
 
-    def test_run_builds_kwargs_and_handles_empty_itertracks(self) -> None:
+    def test_load_passes_token_kwarg_and_moves_to_device(self, fake_pyannote) -> None:
+        from taigi_asr.diarize import DEFAULT_PIPELINE_ID, DiarizationPipeline
+
+        d = DiarizationPipeline(device="cpu", hf_token="hf_x")
+        d.load()
+        # pyannote 4.x: ``token=`` (``use_auth_token=`` is a TypeError there).
+        assert fake_pyannote["calls"] == [((DEFAULT_PIPELINE_ID,), {"token": "hf_x"})]
+        assert fake_pyannote["moved_to"] == "cpu"
+        assert d.is_loaded() is True
+        d.load()  # idempotent
+        assert len(fake_pyannote["calls"]) == 1
+
+    def test_offline_mode_loads_without_token(self, fake_pyannote, monkeypatch) -> None:
+        import huggingface_hub
+
+        from taigi_asr.diarize import DiarizationPipeline
+
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+        monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+        monkeypatch.setattr(huggingface_hub, "get_token", lambda: None)
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        d = DiarizationPipeline(device="cpu")
+        d.load()
+        assert fake_pyannote["calls"][0][1] == {"token": None}
+
+    def test_run_builds_kwargs_and_handles_empty_itertracks(self, monkeypatch) -> None:
         """Cover the Python-testable parts of DiarizationPipeline.run() that
         are NOT pyannote-GPU-bound: the kw-builder (passes through num/min/max
         speakers), the ``self._pipeline is None`` guard, and the post-loop
@@ -374,11 +545,17 @@ class TestDiarizationPipelineErrorMapping:
             def itertracks(self, yield_label=True):
                 return iter([])
 
-        def _fake_pipeline_call(_wav_path, **kw):
+        def _fake_pipeline_call(audio, **kw):
+            assert audio == {"waveform": "W", "sample_rate": 16000}
             captured_kwargs.append(kw)
             return _EmptyDiarization()
 
-        d = DiarizationPipeline(hf_token="dummy")
+        import taigi_asr.diarize as dia_mod
+
+        monkeypatch.setattr(
+            dia_mod, "_load_waveform", lambda p: {"waveform": "W", "sample_rate": 16000}
+        )
+        d = DiarizationPipeline(device="cpu", hf_token="dummy")
         # Bypass load() — directly install a callable as the underlying
         # pipeline. This lets us hit run()'s pure-Python branches without
         # spinning up pyannote.
@@ -407,58 +584,78 @@ class TestDiarizationPipelineErrorMapping:
     def test_is_loaded_false_before_load(self) -> None:
         from taigi_asr.diarize import DiarizationPipeline
 
-        d = DiarizationPipeline(hf_token="dummy")
+        d = DiarizationPipeline(device="cpu", hf_token="dummy")
         assert d.is_loaded() is False
 
-    def test_load_raises_when_pipeline_from_pretrained_returns_none(self, monkeypatch) -> None:
+    def test_run_unwraps_diarize_output_and_sorts(self, monkeypatch) -> None:
+        import taigi_asr.diarize as dia_mod
+        from taigi_asr.diarize import DiarizationPipeline, SpeakerTurn
+
+        class _Seg:
+            def __init__(self, s, e):
+                self.start, self.end = s, e
+
+        class _Ann:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def itertracks(self, yield_label=True):
+                return iter([(_Seg(s, e), "t", spk) for s, e, spk in self.rows])
+
+        class _DiarizeOutput:  # pyannote 4.x return type
+            speaker_diarization = _Ann([(0.0, 9.0, "WRONG")])
+            exclusive_speaker_diarization = _Ann(
+                [(2.0, 3.0, "SPEAKER_01"), (0.0, 2.0, "SPEAKER_00")]
+            )
+
+        monkeypatch.setattr(dia_mod, "_load_waveform", lambda p: {})
+        d = DiarizationPipeline(device="cpu", hf_token="dummy")
+        d._pipeline = lambda audio, **kw: _DiarizeOutput()  # type: ignore[assignment]
+        d._loaded = True
+        assert d.run("x.wav") == [
+            SpeakerTurn(0.0, 2.0, "SPEAKER_00"),
+            SpeakerTurn(2.0, 3.0, "SPEAKER_01"),
+        ]
+
+    def test_load_raises_when_pipeline_from_pretrained_returns_none(self, fake_pyannote) -> None:
         """Some HF auth failure modes (notably partial license acceptance) make
         ``Pipeline.from_pretrained`` return ``None`` rather than raise. The
         ``if pipeline is None: raise ModelLoadError(...)`` branch in
         ``DiarizationPipeline.load()`` exists for exactly this case; cover it
         by mocking the upstream call."""
-        import sys
-
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
 
-        class _FakePipelineModule:
-            class Pipeline:
-                @staticmethod
-                def from_pretrained(*a, **kw):
-                    return None
-
-        monkeypatch.setitem(sys.modules, "pyannote.audio", _FakePipelineModule)
-        d = DiarizationPipeline(hf_token="dummy_token")
+        fake_pyannote["return_none"] = True
+        d = DiarizationPipeline(device="cpu", hf_token="dummy_token")
         with pytest.raises(ModelLoadError, match="Failed to load"):
             d.load()
         # Ensure the load() guard kept the pipeline unset on this failure path.
         assert d.is_loaded() is False
 
     def test_load_raises_when_no_hf_token(self, monkeypatch) -> None:
+        import huggingface_hub
+
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
 
-        # Strip both env vars so the constructor's resolution chain finds no token.
+        # Strip both env vars and the `hf auth login` token so the
+        # constructor's resolution chain finds nothing.
         monkeypatch.delenv("HF_TOKEN", raising=False)
         monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setattr(huggingface_hub, "get_token", lambda: None)
 
-        d = DiarizationPipeline(hf_token=None)
+        d = DiarizationPipeline(device="cpu", hf_token=None)
         with pytest.raises(ModelLoadError, match="HF_TOKEN env var required"):
             d.load()
 
-    def test_other_errors_use_generic_message(self, monkeypatch) -> None:
+    def test_other_errors_use_generic_message(self, fake_pyannote) -> None:
         from taigi_asr.diarize import DiarizationPipeline
         from taigi_asr.errors import ModelLoadError
 
-        class _FakePipelineModule:
-            class Pipeline:
-                @staticmethod
-                def from_pretrained(*a, **kw):
-                    raise RuntimeError("disk full")
-
-        monkeypatch.setitem(__import__("sys").modules, "pyannote.audio", _FakePipelineModule)
-
-        d = DiarizationPipeline(hf_token="hf_dummy_token")
+        fake_pyannote["behaviour"] = RuntimeError("disk full")
+        d = DiarizationPipeline(device="cpu", hf_token="hf_dummy_token")
         with pytest.raises(ModelLoadError, match="Failed to load") as exc_info:
             d.load()
         # The targeted-license branch must NOT swallow unrelated errors.

@@ -59,13 +59,16 @@ hf = [
     "accelerate>=0.30",
     "bitsandbytes>=0.43; sys_platform == 'linux'",
 ]
-# Speaker diarization via pyannote/speaker-diarization-3.1.
-# Pinned <4 because 4.0 requires torch>=2.8 and the project targets the
-# CUDA 12.4 wheel of torch 2.6 for the RTX 3050 / 4 GB path.
-# Requires HF_TOKEN + license acceptance for both speaker-diarization-3.1
-# and segmentation-3.0; see README "講者分群" section for setup.
+# Speaker diarization (default pipeline: pyannote/speaker-diarization-community-1).
+# 4.0.3+ only: the 3.x line passes ``use_auth_token`` (removed in
+# huggingface_hub 1.0, which gradio 6 requires), crashes at import on
+# torchaudio >= 2.9, and trips torch's weights_only default with
+# Lightning >= 2.6; 4.0.0-4.0.2 still had that last bug.
+# pyannote 4 requires torch >= 2.8: install a CUDA build of torch first
+# (README "講者分群"), or pip pulls the PyPI wheel, which is CPU-only on
+# Windows. Needs an HF token + accepting the model's user conditions.
 diarize = [
-    "pyannote.audio>=3.1,<4",
+    "pyannote.audio>=4.0.3,<5",
 ]
 dev = [
     "pytest>=8",

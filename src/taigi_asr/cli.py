@@ -40,6 +40,16 @@ def _parse_engine(raw: str) -> EngineKind | None:
     return mapping[raw]
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="taigi-asr",
@@ -107,28 +117,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--diarize",
         action="store_true",
         help=(
-            "Attach pyannote/speaker-diarization-3.1 speaker labels to every "
-            "segment. Requires HF_TOKEN env var and license acceptance for "
-            "pyannote/speaker-diarization-3.1 + pyannote/segmentation-3.0. "
-            "Adds a sequential pass on the same GPU after ASR (ASR unloads "
-            "first to keep peak VRAM under 4 GB)."
+            "Attach pyannote speaker labels to every segment and write a "
+            ".rttm next to each input. Default pipeline: "
+            "pyannote/speaker-diarization-community-1 (override with the "
+            "TAIGI_ASR_DIARIZE_PIPELINE env var). Requires pip install "
+            "'.[diarize]', an HF token (HF_TOKEN or `hf auth login`) and the "
+            "model's user conditions accepted on huggingface.co. Runs as a "
+            "second pass after ASR unloads, so the two models never share VRAM. "
+            "Combine with --word-timestamps for shorter lines and finer "
+            "speaker turns."
         ),
     )
     parser.add_argument(
         "--num-speakers",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Exact speaker count for diarization (overrides auto-detect).",
     )
     parser.add_argument(
         "--min-speakers",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Lower bound on speaker count (with --diarize).",
     )
     parser.add_argument(
         "--max-speakers",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Upper bound on speaker count (with --diarize).",
     )
@@ -486,10 +500,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.max_speakers is not None:
                     diarize_kwargs["max_speakers"] = args.max_speakers
 
-                dia = DiarizationPipeline()
+                dia_device = "cuda" if info.cuda_available else "cpu"
+                dia = DiarizationPipeline(device=dia_device)
                 try:
                     print(
-                        "\nLoading pyannote/speaker-diarization-3.1 on cuda...",
+                        f"\nLoading {dia.PIPELINE_ID} on {dia_device}...",
                         file=sys.stderr,
                     )
                     try:

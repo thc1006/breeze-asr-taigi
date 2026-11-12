@@ -1,16 +1,29 @@
-"""Speaker diarization via pyannote/speaker-diarization-3.1.
+"""Speaker diarization via pyannote.audio 4.x.
+
+Default pipeline: ``pyannote/speaker-diarization-community-1``. Any pipeline
+pyannote.audio 4.x can load (e.g. ``pyannote/speaker-diarization-3.1``) can be
+selected with the ``TAIGI_ASR_DIARIZE_PIPELINE`` env var.
 
 Wraps the pyannote pipeline with the same load/run/unload contract as the ASR
 engines so the CLI can swap models cleanly on a 4 GB VRAM budget. Also exposes
 ``attribute_speakers`` (overlap-based speaker assignment) and ``parse_rttm`` /
 ``turns_to_rttm`` so the same code path serves both the integrated CLI and the
 standalone ``scripts/merge_diarize.py`` / ``scripts/diarize_compare.py`` tools.
+
+Why 4.x (``pyannote.audio>=4.0.3``) and not 3.x: on today's dependency set the
+3.x line cannot work at all. It passes ``use_auth_token`` to
+``huggingface_hub.hf_hub_download``, which huggingface_hub 1.0 removed (and
+gradio 6, a base dependency, needs huggingface_hub >= 1.16); it crashes at
+import on torchaudio >= 2.9 (``torchaudio.AudioMetaData`` was removed); and
+Lightning >= 2.6 makes its checkpoint load hit PyTorch's ``weights_only=True``
+default. 4.0.3+ passes ``weights_only=False`` itself, so no ``torch.load``
+patching is needed any more.
 """
 
 from __future__ import annotations
 
-import contextlib
 import gc
+import importlib.metadata
 import logging
 import os
 import re
@@ -24,37 +37,54 @@ import torch
 from taigi_asr.errors import ModelLoadError, TranscriptionError
 from taigi_asr.segments import TimestampedSegment
 
-# Serializes the global ``torch.load`` patch so two concurrent
-# DiarizationPipeline.load() calls don't capture each other's patched
-# version as the "original" and leak the patch on restore.
-_torch_load_patch_lock = threading.Lock()
+log = logging.getLogger(__name__)
+
+DEFAULT_PIPELINE_ID = "pyannote/speaker-diarization-community-1"
+PIPELINE_ENV_VAR = "TAIGI_ASR_DIARIZE_PIPELINE"
+MIN_PYANNOTE_MAJOR = 4
+
+# Gated repos whose user conditions must be accepted, per pipeline. Pipelines
+# not listed here only gate their own repo.
+_GATED_REPOS: dict[str, tuple[str, ...]] = {
+    "pyannote/speaker-diarization-3.1": (
+        "pyannote/speaker-diarization-3.1",
+        "pyannote/segmentation-3.0",
+    ),
+}
 
 
-@contextlib.contextmanager
-def _torch_load_weights_only_false():
-    """Temporarily force ``weights_only=False`` on ``torch.load``.
+def resolve_pipeline_id(explicit: str | None = None) -> str:
+    """Explicit argument > ``TAIGI_ASR_DIARIZE_PIPELINE`` > community-1."""
+    return explicit or os.environ.get(PIPELINE_ENV_VAR, "").strip() or DEFAULT_PIPELINE_ID
 
-    PyTorch 2.6 flipped the default to ``True``, which breaks pyannote 3.4's
-    Lightning checkpoint (contains non-tensor globals like ``TorchVersion``).
-    We patch only for the duration of ``Pipeline.from_pretrained`` so other
-    libraries (including faster-whisper's own checkpoint code) keep the safer
-    default. Restoring in ``finally`` guarantees no leak even if pyannote
-    raises mid-load. The module-level lock makes the patch safe across
-    concurrent loaders (the typical CLI use is single-threaded, but library
-    consumers may parallelize).
-    """
-    with _torch_load_patch_lock:
-        original = torch.load
 
-        def _patched(*args, **kwargs):
-            kwargs["weights_only"] = False
-            return original(*args, **kwargs)
+def gated_repos(pipeline_id: str) -> tuple[str, ...]:
+    return _GATED_REPOS.get(pipeline_id, (pipeline_id,))
 
-        torch.load = _patched  # type: ignore[assignment]
-        try:
-            yield
-        finally:
-            torch.load = original  # type: ignore[assignment]
+
+def _resolve_hf_token(explicit: str | None) -> str | None:
+    """Explicit token > ``HF_TOKEN`` / ``HUGGINGFACE_HUB_TOKEN`` > the token
+    saved by ``hf auth login`` (via ``huggingface_hub.get_token``)."""
+    token = explicit or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        return token
+    try:
+        from huggingface_hub import get_token
+    except ImportError:  # pragma: no cover - huggingface_hub is a base dependency
+        return None
+    try:
+        return get_token()
+    except Exception:  # pragma: no cover - corrupt token file etc.
+        return None
+
+
+def _hf_offline() -> bool:
+    """True when ``HF_HUB_OFFLINE`` is set: cached gated models need no token."""
+    return os.environ.get("HF_HUB_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _version_tuple(raw: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in re.findall(r"\d+", raw)[:3])
 
 
 # RTTM is space-delimited; URIs and speaker labels with whitespace would corrupt
@@ -68,19 +98,33 @@ def _torch_load_weights_only_false():
 # threat model — URIs are always derived from local audio file names.
 _RTTM_SAFE_RE = re.compile(r"^\S+$")
 
+# speechbrain fixed the Windows ``inspect.py`` path check in 1.1.1
+# (speechbrain/speechbrain#3065).
+_SPEECHBRAIN_FIXED = (1, 1, 1)
+
 
 def _patch_speechbrain_lazy_module() -> None:
-    """Windows-only fix for speechbrain's introspection-bypass check.
+    """Windows-only fix for speechbrain < 1.1.1's introspection-bypass check.
+
+    pyannote.audio 4.x no longer depends on speechbrain, but still imports it
+    when it happens to be installed. Older speechbrain's
+    ``LazyModule.ensure_module`` checks ``filename.endswith("/inspect.py")``,
+    which never matches ``...\\inspect.py`` on Windows, so introspection
+    triggers lazy imports of optional integrations (k2, ...) and fails with an
+    opaque ``Lazy import of LazyModule(...) failed``.
 
     Replaces ``ensure_module`` with a version that recognizes both ``/`` and
-    ``\\`` as path separators when probing ``importer_frame.filename`` for
-    ``inspect.py``. Gated on ``sys.platform == "win32"`` so POSIX runs pick
-    up any future upstream speechbrain bug fix without our patch masking it.
-    The ``_taigi_patched`` sentinel keys on class identity (no version
-    check); long-lived Jupyter kernels that upgrade speechbrain mid-session
-    should restart to pick up the new method.
+    ``\\``. Gated on ``sys.platform == "win32"`` and on the installed
+    speechbrain being older than the upstream fix, so fixed versions are
+    never masked. The ``_taigi_patched`` sentinel makes it idempotent.
     """
     if sys.platform != "win32":
+        return
+    try:
+        installed = _version_tuple(importlib.metadata.version("speechbrain"))
+    except importlib.metadata.PackageNotFoundError:
+        return
+    if installed >= _SPEECHBRAIN_FIXED:
         return
     try:
         from speechbrain.utils import importutils as _sb_iu
@@ -121,9 +165,58 @@ def _patch_speechbrain_lazy_module() -> None:
     _sb_iu.LazyModule._taigi_patched = True
 
 
-log = logging.getLogger(__name__)
+def _check_pyannote_version() -> None:
+    """Fail with an actionable message instead of a deep TypeError/AttributeError."""
+    try:
+        raw = importlib.metadata.version("pyannote.audio")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ModelLoadError(
+            'pyannote.audio not installed. Run: pip install -e ".[diarize]" '
+            "(see README: install a CUDA torch >= 2.8 first)."
+        ) from exc
+    if _version_tuple(raw)[:1] < (MIN_PYANNOTE_MAJOR,):
+        raise ModelLoadError(
+            f"pyannote.audio {raw} is too old: the 3.x line is incompatible with "
+            "huggingface_hub >= 1.0 and torchaudio >= 2.9. Run: "
+            'pip install -U "pyannote.audio>=4.0.3,<5"'
+        )
 
-PYANNOTE_PIPELINE_ID = "pyannote/speaker-diarization-3.1"
+
+def _load_waveform(wav_path: str | Path) -> dict:
+    """Read a WAV into pyannote's in-memory input format.
+
+    Passing ``{"waveform", "sample_rate"}`` instead of a path keeps pyannote
+    4.x off its torchcodec decoder, which needs FFmpeg *shared libraries*
+    (not just the ``ffmpeg`` binary this project uses) — often missing on
+    Windows. The input is AudioConverter's 16 kHz mono WAV; multi-channel
+    input is down-mixed defensively.
+    """
+    import soundfile as sf
+
+    try:
+        data, sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=True)
+    except Exception as exc:
+        raise TranscriptionError(f"cannot read audio for diarization: {exc}") from exc
+    waveform = torch.from_numpy(data.T.copy())  # (channel, time)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return {"waveform": waveform, "sample_rate": int(sample_rate)}
+
+
+def _annotation_from_output(output):
+    """Unwrap pyannote 4.x ``DiarizeOutput``.
+
+    Prefers ``exclusive_speaker_diarization`` (one speaker at a time), which
+    pyannote provides precisely for reconciling diarization with transcript
+    timestamps; falls back to ``speaker_diarization``, then to the object
+    itself (a bare ``Annotation``, as legacy pipelines return). Explicit
+    ``None`` checks, not ``or``: an empty Annotation is falsy.
+    """
+    for attr in ("exclusive_speaker_diarization", "speaker_diarization"):
+        annotation = getattr(output, attr, None)
+        if annotation is not None:
+            return annotation
+    return output
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,73 +233,72 @@ class SpeakerTurn:
 
 
 class DiarizationPipeline:
-    """pyannote/speaker-diarization-3.1 wrapper.
+    """pyannote.audio 4.x speaker-diarization wrapper.
 
     Mirrors the ASR engine load/unload protocol so the CLI can sequence
     ``engine.unload()`` -> ``diarize.load()`` and stay under 4 GB VRAM.
     """
 
-    PIPELINE_ID = PYANNOTE_PIPELINE_ID
+    PIPELINE_ID = DEFAULT_PIPELINE_ID
 
-    def __init__(self, device: str = "cuda", hf_token: str | None = None) -> None:
-        self.device = device
-        self.hf_token = (
-            hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-        )
+    def __init__(
+        self,
+        device: str | None = None,
+        hf_token: str | None = None,
+        pipeline_id: str | None = None,
+    ) -> None:
+        # ``device=None`` -> CUDA when available, else CPU (pyannote runs on
+        # CPU too, just slower), instead of failing on CPU-only machines.
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.hf_token = _resolve_hf_token(hf_token)
+        # Instance attribute shadows the class default so callers can keep
+        # reading ``pipeline.PIPELINE_ID``.
+        self.PIPELINE_ID = resolve_pipeline_id(pipeline_id)
         self._pipeline = None
         self._loaded = False
         self._lock = threading.Lock()
+
+    def _license_hint(self) -> str:
+        pages = " AND ".join(
+            f"https://huggingface.co/{repo}" for repo in gated_repos(self.PIPELINE_ID)
+        )
+        return (
+            f"Visit {pages} with the same HF account that owns the token and "
+            "accept the user conditions on each page, then retry."
+        )
 
     def load(self) -> None:
         with self._lock:
             if self._loaded:
                 return
-            if not self.hf_token:
+            if not self.hf_token and not _hf_offline():
                 raise ModelLoadError(
-                    "HF_TOKEN env var required for pyannote diarization. "
-                    "Create a token at https://hf.co/settings/tokens and accept "
-                    "the license for pyannote/speaker-diarization-3.1 + "
-                    "pyannote/segmentation-3.0."
+                    f"HF_TOKEN env var required for pyannote diarization ({self.PIPELINE_ID}). "
+                    "Create a read token at https://hf.co/settings/tokens and set HF_TOKEN "
+                    "(or run `hf auth login`). " + self._license_hint()
                 )
-            # speechbrain 1.0+ has a Windows path bug in
-            # ``speechbrain.utils.importutils.LazyModule.ensure_module``: it
-            # checks ``importer_frame.filename.endswith("/inspect.py")`` to
-            # bypass lazy loads triggered by introspection (PyTorch op
-            # registry, hasattr probes, etc.). On Windows the file path is
-            # ``...\\inspect.py`` so the check never matches, and the lazy
-            # import actually runs — which fails for integrations that
-            # depend on k2 / unavailable packages, raising an opaque
-            # ``Lazy import of LazyModule(...) failed``. We patch the method
-            # in place to accept the Windows separator too. Idempotent via
-            # the ``_taigi_patched`` sentinel.
+            _check_pyannote_version()
             _patch_speechbrain_lazy_module()
 
             try:
                 from pyannote.audio import Pipeline
             except ImportError as exc:  # pragma: no cover
-                raise ModelLoadError(
-                    "pyannote.audio not installed. Run: pip install 'pyannote.audio<4'"
-                ) from exc
+                raise ModelLoadError(f"pyannote.audio failed to import: {exc}") from exc
 
             try:
-                with _torch_load_weights_only_false():
-                    pipeline = Pipeline.from_pretrained(  # pragma: no cover - real HF network + checkpoint load
-                        self.PIPELINE_ID, use_auth_token=self.hf_token
-                    )
+                pipeline = Pipeline.from_pretrained(  # pragma: no cover - real HF network + checkpoint load
+                    self.PIPELINE_ID, token=self.hf_token
+                )
                 if pipeline is None:
                     raise ModelLoadError(
-                        f"Failed to load {self.PIPELINE_ID} — verify HF_TOKEN "
-                        "and that you accepted the license for both "
-                        "pyannote/speaker-diarization-3.1 and "
-                        "pyannote/segmentation-3.0 at https://hf.co/."
+                        f"Failed to load {self.PIPELINE_ID} — verify the HF token. "
+                        + self._license_hint()
                     )
-                pipeline.to(torch.device(self.device))  # pragma: no cover - real GPU device move
-                self._pipeline = (
-                    pipeline  # pragma: no cover - reached only after real pyannote load
-                )
+                pipeline.to(torch.device(self.device))  # pragma: no cover - real device move
+                self._pipeline = pipeline  # pragma: no cover
                 self._loaded = True  # pragma: no cover
                 log.info(  # pragma: no cover
-                    "pyannote diarization pipeline loaded on %s", self.device
+                    "pyannote pipeline %s loaded on %s", self.PIPELINE_ID, self.device
                 )
             except ModelLoadError:
                 raise
@@ -220,11 +312,7 @@ class DiarizationPipeline:
                 if "gated" in lower or "401" in msg or "403" in msg or "unauthorized" in lower:
                     raise ModelLoadError(
                         f"License acceptance required for {self.PIPELINE_ID}. "
-                        "Visit https://huggingface.co/pyannote/speaker-diarization-3.1 "
-                        "AND https://huggingface.co/pyannote/segmentation-3.0 with "
-                        "the same HF account that owns HF_TOKEN, click "
-                        "'Agree and access repository' on each, then retry. "
-                        f"(Upstream error: {exc})"
+                        f"{self._license_hint()} (Upstream error: {exc})"
                     ) from exc
                 raise ModelLoadError(f"Failed to load {self.PIPELINE_ID}: {exc}") from exc
 
@@ -257,26 +345,16 @@ class DiarizationPipeline:
             if max_speakers is not None:
                 kw["max_speakers"] = max_speakers
 
+            audio = _load_waveform(wav_path)
             try:
-                diarization = self._pipeline(str(wav_path), **kw)
+                output = self._pipeline(audio, **kw)
             except Exception as exc:  # pragma: no cover - real pyannote GPU error
                 raise TranscriptionError(f"diarization failed: {exc}") from exc
 
-            turns: list[SpeakerTurn] = []
-            for (
-                turn,
-                _,
-                speaker,
-            ) in diarization.itertracks(
-                yield_label=True
-            ):  # pragma: no cover - real pyannote diarization object iteration
-                turns.append(
-                    SpeakerTurn(
-                        start=float(turn.start),
-                        end=float(turn.end),
-                        speaker=str(speaker),
-                    )
-                )
+            turns = [
+                SpeakerTurn(start=float(turn.start), end=float(turn.end), speaker=str(speaker))
+                for turn, _, speaker in _annotation_from_output(output).itertracks(yield_label=True)
+            ]
             turns.sort(key=lambda t: t.start)
             return turns
 
