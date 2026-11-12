@@ -105,7 +105,7 @@ from taigi_asr.formatters import to_srt
 from taigi_asr.router import EngineKind, EngineRouter, GPUProfiler
 
 info = GPUProfiler.detect()
-spec = EngineRouter.select(info)           # 自動路由
+spec = EngineRouter.select(info)  # 自動路由
 wav, duration = AudioConverter.convert("audio.m4a")
 
 engine = build_engine(spec)
@@ -128,9 +128,7 @@ engine.unload()
 ```python
 from taigi_asr.engines.faster_whisper import FasterWhisperEngine
 
-engine = FasterWhisperEngine(
-    device="cuda", compute_type="int8_float16", batch_size=4, beam_size=5
-)
+engine = FasterWhisperEngine(device="cuda", compute_type="int8_float16", batch_size=4, beam_size=5)
 engine.load()
 segments = engine.transcribe("audio.m4a")
 ```
