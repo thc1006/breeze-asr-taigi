@@ -24,63 +24,15 @@ from taigi_asr.config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_VAD_MIN_SILENCE_MS,
     DEFAULT_VAD_SPEECH_PAD_MS,
+    DEFAULT_WORD_SPLIT_GAP_S,
+    DEFAULT_WORD_SPLIT_MAX_S,
     FASTER_WHISPER_MODEL_ID,
 )
 from taigi_asr.errors import ModelLoadError, TranscriptionError
 from taigi_asr.segments import TimestampedSegment
+from taigi_asr.word_grouping import group_words, words_match_text
 
 log = logging.getLogger(__name__)
-
-# Word-grouping thresholds, used only when ``word_timestamps=True``.
-# faster-whisper's own segments run 25 s+ on meeting audio — long enough to
-# span several speakers, which makes downstream diarization label the whole
-# line as whoever happened to talk most. Splitting on natural pauses (and
-# capping the span) keeps each line inside a single speaker's turn.
-WORD_SPLIT_GAP_S = 0.4
-WORD_SPLIT_MAX_S = 8.0
-
-
-def _group_words(words, max_gap: float, max_span: float) -> list[TimestampedSegment]:
-    """Collapse per-word timings into short, speaker-alignable lines."""
-    lines: list[TimestampedSegment] = []
-    buf: list = []
-
-    def emit(chunk: list) -> None:
-        text = "".join(w.word for w in chunk).strip()
-        if text:
-            lines.append(TimestampedSegment(float(chunk[0].start), float(chunk[-1].end), text))
-
-    def split_overlong() -> None:
-        """Cut at the widest internal pause instead of mid-phrase at the cap.
-
-        Hard-cutting the moment the span limit is hit lands in the middle of a
-        word ("今天的會" / "議內容"), which reads badly in the SRT. The widest
-        pause inside the buffer is the least-bad boundary available.
-        """
-        nonlocal buf
-        if len(buf) < 2:
-            emit(buf)
-            buf = []
-            return
-        _, idx = max(
-            (float(b.start) - float(a.end), i)
-            for i, (a, b) in enumerate(zip(buf, buf[1:], strict=False))
-        )
-        emit(buf[: idx + 1])
-        buf = buf[idx + 1 :]
-
-    for w in words:
-        if w.start is None or w.end is None:
-            continue
-        if buf and float(w.start) - float(buf[-1].end) >= max_gap:
-            emit(buf)
-            buf = []
-        buf.append(w)
-        while buf and float(buf[-1].end) - float(buf[0].start) >= max_span:
-            split_overlong()
-    if buf:
-        emit(buf)
-    return lines
 
 
 class FasterWhisperEngine:
@@ -243,11 +195,18 @@ class FasterWhisperEngine:
                 if not text:
                     continue
                 # With word_timestamps the model has already computed per-word
-                # timings; use them instead of throwing them away and emitting
-                # one 25-second line.
+                # timings; use them to cut the (often 25 s+) segment into
+                # short, pause-delimited lines instead of discarding them.
+                # Only when the words spell exactly this segment's text:
+                # faster-whisper can shift words into the previous segment,
+                # and regrouping those would duplicate or drop text.
                 words = getattr(seg, "words", None) if word_timestamps else None
-                if words:
-                    grouped = _group_words(words, WORD_SPLIT_GAP_S, WORD_SPLIT_MAX_S)
+                if words and words_match_text(words, text):
+                    grouped = group_words(
+                        words,
+                        max_gap=DEFAULT_WORD_SPLIT_GAP_S,
+                        max_span=DEFAULT_WORD_SPLIT_MAX_S,
+                    )
                     if grouped:
                         out.extend(grouped)
                         continue
