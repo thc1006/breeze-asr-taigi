@@ -269,7 +269,7 @@ def build_ui() -> gr.Blocks:
             )
             word_ts = gr.Checkbox(
                 value=False,
-                label="Word-level timestamps（逐字時間戳記，較慢）",
+                label="Word-level timestamps（依停頓切成短句，略慢）",
             )
             beam_slider = gr.Slider(
                 minimum=1,

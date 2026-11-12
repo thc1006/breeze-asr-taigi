@@ -81,7 +81,7 @@ CLI 選項：
 | `--out` | 自動 | 輸出路徑（**只在單檔 + 單格式時生效**；其他情況輸出落在輸入旁） |
 | `--beam-size` | 5 | beam search 寬度（4GB GPU 建議 5-10）|
 | `--best-of` | 5 | 溫度採樣候選數 |
-| `--word-timestamps` | False | 逐字時間戳記（較慢）|
+| `--word-timestamps` | False | 用詞級時間在自然停頓處切行（Faster-Whisper 每行 ≤ 8 秒；略慢）|
 | `-v` / `-vv` | WARN | 增加 log 詳細度 |
 
 `--input-dir` 自動撈的副檔名：`.mp3`, `.m4a`, `.wav`, `.flac`, `.ogg`, `.webm`, `.mp4`, `.mkv`, `.aac`, `.opus`, `.wma`。其他格式（如 `.aiff`）只要 ffmpeg 認得，仍可走 positional 直接傳。
