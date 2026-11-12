@@ -61,8 +61,8 @@ Both configs fit during `load()` (~2 GB). The difference shows up at encoder tim
 FasterWhisperEngine(
     device="cuda",
     compute_type="int8_float16",  # best on Ampere consumer cards
-    batch_size=4,                  # ceiling for 4 GB during decoder generation
-    beam_size=5,                   # accuracy/speed sweet spot
+    batch_size=4,  # ceiling for 4 GB during decoder generation
+    beam_size=5,  # accuracy/speed sweet spot
     best_of=5,
     temperature=0.0,
     # vad_filter=True (default in transcribe())

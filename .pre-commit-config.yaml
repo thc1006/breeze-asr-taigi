@@ -13,11 +13,11 @@ repos:
         args: [--fix=lf]
         exclude: '\.(bat|cmd)$'   # .bat files need CRLF on Windows
 
-  # Ruff rev tracks the "ruff>=0.6" floor in pyproject.toml. Keep in
-  # sync with the CI lint job so local hook output matches CI exactly.
+  # Ruff rev must equal the exact version pinned in the CI lint job
+  # (.github/workflows/ci.yml) so local hook output matches CI exactly.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.6
+    rev: v0.17.4
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: [--fix]
       - id: ruff-format

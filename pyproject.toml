@@ -44,6 +44,12 @@ dependencies = [
     # pull the CPU wheel by default on `pip install`, silently defeating the
     # GPU optimisation this project is built for.
     "faster-whisper>=1.1.0",
+    # faster-whisper <=1.2.1 calls ``av.open(..., metadata_errors="ignore")``,
+    # a kwarg PyAV 19 removed -> every file-path transcribe raises TypeError.
+    # PyAV 19 is Python>=3.12-only, so 3.10/3.11 never saw it. Fixed upstream
+    # (SYSTRAN/faster-whisper#1589) but unreleased; drop this cap once a
+    # faster-whisper release newer than 1.2.1 is the floor.
+    "av>=11,<19",
     "soundfile>=0.12",
     "pydub>=0.25",
     "numpy>=1.24",

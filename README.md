@@ -82,7 +82,7 @@ CLI 選項：
 | `--out` | 自動 | 輸出路徑（**只在單檔 + 單格式時生效**；其他情況輸出落在輸入旁） |
 | `--beam-size` | 5 | beam search 寬度（4GB GPU 建議 5-10）|
 | `--best-of` | 5 | 溫度採樣候選數 |
-| `--word-timestamps` | False | 逐字時間戳記（較慢）|
+| `--word-timestamps` | False | 用詞級時間在自然停頓處切行（Faster-Whisper 每行 ≤ 8 秒；略慢）|
 | `--diarize` | False | 接上 pyannote 講者分群（見下方專節，需 HF token + 接受模型使用條款）|
 | `--num-speakers` | — | 指定講者數（與 `--min/--max-speakers` 互斥）|
 | `--min-speakers` | — | 講者數下限（搭配 `--diarize`）|
@@ -110,7 +110,7 @@ from taigi_asr.formatters import to_srt
 from taigi_asr.router import EngineKind, EngineRouter, GPUProfiler
 
 info = GPUProfiler.detect()
-spec = EngineRouter.select(info)           # 自動路由
+spec = EngineRouter.select(info)  # 自動路由
 wav, duration = AudioConverter.convert("audio.m4a")
 
 engine = build_engine(spec)
@@ -133,9 +133,7 @@ engine.unload()
 ```python
 from taigi_asr.engines.faster_whisper import FasterWhisperEngine
 
-engine = FasterWhisperEngine(
-    device="cuda", compute_type="int8_float16", batch_size=4, beam_size=5
-)
+engine = FasterWhisperEngine(device="cuda", compute_type="int8_float16", batch_size=4, beam_size=5)
 engine.load()
 segments = engine.transcribe("audio.m4a")
 ```

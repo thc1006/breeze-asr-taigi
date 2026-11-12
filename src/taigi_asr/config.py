@@ -47,6 +47,14 @@ DEFAULT_PATIENCE = 1.0
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_VAD_MIN_SILENCE_MS = 500
 DEFAULT_VAD_SPEECH_PAD_MS = 200
+# Line splitting from word timings (faster-whisper, ``word_timestamps=True``).
+# faster-whisper's own segments run 25 s+ on meeting audio -- long enough to
+# span several speakers, so overlap-based diarization labels the whole line
+# as whoever talked most. Start a new line at a pause and cap the line span.
+# Word gaps only appear where VAD removed silence, so with the VAD settings
+# above a 0.4 s gap corresponds to roughly 0.8 s of actual silence.
+DEFAULT_WORD_SPLIT_GAP_S = 0.4
+DEFAULT_WORD_SPLIT_MAX_S = 8.0
 DEFAULT_LANGUAGE = "zh"  # Breeze-ASR-26 fine-tunes Whisper on Taiwanese Hokkien
 # but uses Mandarin token vocabulary.
 DEFAULT_CHUNK_LENGTH_S = 30

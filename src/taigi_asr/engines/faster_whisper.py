@@ -24,10 +24,13 @@ from taigi_asr.config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_VAD_MIN_SILENCE_MS,
     DEFAULT_VAD_SPEECH_PAD_MS,
+    DEFAULT_WORD_SPLIT_GAP_S,
+    DEFAULT_WORD_SPLIT_MAX_S,
     FASTER_WHISPER_MODEL_ID,
 )
 from taigi_asr.errors import ModelLoadError, TranscriptionError
 from taigi_asr.segments import TimestampedSegment
+from taigi_asr.word_grouping import group_words, words_match_text
 
 log = logging.getLogger(__name__)
 
@@ -191,6 +194,22 @@ class FasterWhisperEngine:
                 text = (seg.text or "").strip()
                 if not text:
                     continue
+                # With word_timestamps the model has already computed per-word
+                # timings; use them to cut the (often 25 s+) segment into
+                # short, pause-delimited lines instead of discarding them.
+                # Only when the words spell exactly this segment's text:
+                # faster-whisper can shift words into the previous segment,
+                # and regrouping those would duplicate or drop text.
+                words = getattr(seg, "words", None) if word_timestamps else None
+                if words and words_match_text(words, text):
+                    grouped = group_words(
+                        words,
+                        max_gap=DEFAULT_WORD_SPLIT_GAP_S,
+                        max_span=DEFAULT_WORD_SPLIT_MAX_S,
+                    )
+                    if grouped:
+                        out.extend(grouped)
+                        continue
                 start = float(seg.start) if seg.start is not None else 0.0
                 end = float(seg.end) if seg.end is not None else start + 1.0
                 out.append(TimestampedSegment(start_time=start, end_time=end, text=text))

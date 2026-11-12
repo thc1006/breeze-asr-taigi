@@ -99,7 +99,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--word-timestamps",
         action="store_true",
-        help="Emit word-level timestamps (slower)",
+        help="Use word-level timings to split output into short lines at natural "
+        "pauses (faster-whisper: <= 8 s per line). Improves subtitle readability "
+        "and per-line speaker attribution; slightly slower.",
     )
     parser.add_argument(
         "--beam-size",
